@@ -4,7 +4,7 @@ Original by Atho64
 Fork by Me
 
 Link:
-https://lukazuu.github.io/cstl/
+https://lukazuu.github.io/cstl-next
 
 ## CSTL-NEXT — Plugin System
 
