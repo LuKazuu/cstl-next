@@ -5,6 +5,7 @@
   "version": "1.0.0",
   "author": "CSTL Example",
   "api_version": 1,
+  "matchStrategy": ["extension"],
   "extensions": [".wbin"],
   "wasm": true,
   "description": "Plugin demo WebAssembly: parse format binary sederhana dengan magic bytes. Setiap record = 4-byte big-endian length + UTF-8 string."

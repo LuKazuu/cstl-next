@@ -5,6 +5,7 @@
   "version": "1.0.0",
   "author": "CSTL Example",
   "api_version": 1,
+  "matchStrategy": ["extension"],
   "extensions": [".txt"],
   "description": "Plugin referensi: baca teks per baris, ekspor sebagai .txt dengan baris terjemahan. Mendukung pengaturan delimiter speaker dan skip baris kosong.",
   "settings": [

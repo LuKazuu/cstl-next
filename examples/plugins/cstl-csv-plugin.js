@@ -5,6 +5,7 @@
   "version": "1.0.0",
   "author": "CSTL Example",
   "api_version": 1,
+  "matchStrategy": ["extension"],
   "extensions": [".csv"],
   "description": "Plugin referensi: CSV dengan kolom name,message. Round-trip name,message via CSV quoting. Auto-detect header.",
   "settings": [

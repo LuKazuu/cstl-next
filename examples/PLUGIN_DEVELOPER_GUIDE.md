@@ -79,13 +79,66 @@ module.exports = {
 | `id` | ✅ | `^[a-z0-9][a-z0-9_-]*$` (case-insensitive). Harus unik. |
 | `name` | ✅ | string, non-empty |
 | `version` | ✅ | string (semver bebas) |
-| `extensions` | ✅ | array of strings, masing-masing dimulai dengan `.` (e.g. `.rpy`) |
+| `matchStrategy` | ✅ | string atau array. Pilihan: `'extension'`, `'magic'`, `'filename'`, `'any'`. Tentukan cara CSTL mencocokkan file dengan plugin saat import. Tidak ada default — wajib eksplisit. |
+| `extensions` | wajib jika `matchStrategy` mengandung `'extension'` | array of strings, masing-masing dimulai dengan `.` (e.g. `.rpy`). Boleh kosong untuk strategi non-extension. |
+| `magic` | wajib jika `matchStrategy` mengandung `'magic'` | array of `{ offset: number, hex: string }`. CSTL baca 64 byte pertama file, bandingkan tiap pattern. |
+| `filenameRegex` | wajib jika `matchStrategy` mengandung `'filename'` | string regex JS. Match terhadap nama file (case-insensitive). |
 | `api_version` | ❌ | integer, default 1. Kalau > `PLUGIN_API_VERSION` host, install ditolak. |
 | `author` | ❌ | string |
 | `description` | ❌ | string, ditampilkan di daftar plugin |
 | `wants_js_zip` | ❌ | boolean, default false. Kalau `true`, worker preload JSZip dari CDN saat init. |
 | `wasm` | ❌ | boolean, default false. Info-only — plugin tetap harus akses `host.WebAssembly` / `host.instantiateWasm` sendiri. Ditampilkan sebagai badge ⬛ WASM di UI. |
 | `settings` | ❌ | array of setting specs (lihat bawah). Kalau diisi, UI form otomatis dibuat. |
+
+### Strategi pencocokan file (`matchStrategy`)
+
+**Wajib** diisi. Tidak ada default. CSTL otomatis mendispatch file ke plugin saat import berdasarkan strategi yang dipilih:
+
+- `'extension'` — bandingkan extension file dengan `extensions[]`. Cocok untuk format dengan extension standar (`.rpy`, `.ks`, `.scn`).
+- `'magic'` — cek magic bytes di 64 byte pertama file. Cocok untuk binary format dengan signature tetap (XP3 archive, KiriKiri `ks` tanpa ext, NScripter).
+- `'filename'` — match regex terhadap nama file (case-insensitive). Cocok untuk file tanpa extension dengan pattern nama (`^scene_`, `^bgm_`, dll).
+- `'any'` — match file apa pun. Tidak bisa dikombinasikan dengan strategi lain. Cocok untuk plugin "fallback".
+
+Strategi bisa **dikombinasikan** sebagai array, evaluasi berurutan:
+
+```json
+{
+  "matchStrategy": ["extension", "magic"],
+  "extensions": [".ks"],
+  "magic": [{"offset": 0, "hex": "4b5353434849"}]
+}
+```
+
+Alur dispatch saat user import:
+
+1. CSTL baca 64 byte pertama file pertama
+2. Untuk tiap plugin terdaftar (urutan install), cek tiap strategi di `matchStrategy`
+3. Plugin pertama yang cocok menang
+4. Kalau tidak ada yang cocok → error "tidak ada plugin terpasang yang cocok"
+
+Contoh plugin KiriKiri dengan file `.scn` ATAU file tanpa extension yang dimulai dengan `scene_`:
+
+```js
+/* @cstl-plugin
+{
+  "id": "krkr-scn",
+  "name": "KiriKiri .scn",
+  "version": "1.0.0",
+  "author": "your name",
+  "matchStrategy": ["extension", "filename"],
+  "extensions": [".scn"],
+  "filenameRegex": "^scene_\\w+"
+}
+@cstl-plugin */
+```
+
+Contoh plugin fallback "any" (jarang dipakai — hanya 1 per install):
+
+```json
+{
+  "matchStrategy": "any"
+}
+```
 
 ### Setting spec
 

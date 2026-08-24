@@ -564,8 +564,28 @@ const PluginManager = {
     if (typeof m.id !== 'string' || !/^[a-z0-9][a-z0-9_-]*$/i.test(m.id)) return false;
     if (typeof m.name !== 'string' || !m.name.trim()) return false;
     if (typeof m.version !== 'string') return false;
-    if (!Array.isArray(m.extensions) || !m.extensions.length) return false;
-    if (!m.extensions.every(e => typeof e === 'string' && e.startsWith('.'))) return false;
+    if (!m.matchStrategy) return false;
+    const strategies = Array.isArray(m.matchStrategy) ? m.matchStrategy : [m.matchStrategy];
+    if (!strategies.length) return false;
+    const known = ['extension', 'magic', 'filename', 'any'];
+    if (!strategies.every(s => known.includes(s))) return false;
+    if (strategies.includes('extension')) {
+      if (!Array.isArray(m.extensions) || !m.extensions.length) return false;
+      if (!m.extensions.every(e => typeof e === 'string' && e.startsWith('.'))) return false;
+    }
+    if (strategies.includes('magic')) {
+      if (!Array.isArray(m.magic) || !m.magic.length) return false;
+      for (const mg of m.magic) {
+        if (!mg || typeof mg !== 'object') return false;
+        if (typeof mg.offset !== 'number' || mg.offset < 0 || !Number.isFinite(mg.offset)) return false;
+        if (typeof mg.hex !== 'string' || !/^[0-9a-f]*$/i.test(mg.hex) || !mg.hex.length || mg.hex.length % 2 !== 0) return false;
+      }
+    }
+    if (strategies.includes('filename')) {
+      if (typeof m.filenameRegex !== 'string' || !m.filenameRegex.trim()) return false;
+      try { new RegExp(m.filenameRegex); } catch { return false; }
+    }
+    if (strategies.includes('any') && strategies.length > 1) return false;
 
     if (m.settings != null) {
       if (!Array.isArray(m.settings)) return false;
@@ -591,11 +611,51 @@ const PluginManager = {
     return PluginManager._index;
   },
 
-  async getByExtension(ext) {
+  hexToBytes(hex) {
+    const h = String(hex || '').toLowerCase().replace(/[^0-9a-f]/g, '');
+    const out = new Uint8Array(h.length / 2);
+    for (let i = 0; i < out.length; i++) {
+      out[i] = parseInt(h.substr(i * 2, 2), 16);
+    }
+    return out;
+  },
+
+  matchMagic(buffer, magic) {
+    if (!buffer || !Array.isArray(magic) || !magic.length) return false;
+    for (const mg of magic) {
+      const pat = PluginManager.hexToBytes(mg.hex);
+      const off = mg.offset|0;
+      if (buffer.length < off + pat.length) continue;
+      let ok = true;
+      for (let i = 0; i < pat.length; i++) {
+        if (buffer[off + i] !== pat[i]) { ok = false; break; }
+      }
+      if (ok) return true;
+    }
+    return false;
+  },
+
+  matchFilename(fileName, regexStr) {
+    if (typeof regexStr !== 'string' || !regexStr) return false;
+    try { return new RegExp(regexStr, 'i').test(fileName); } catch { return false; }
+  },
+
+  async resolvePlugin(fileName, sampleBytes) {
     const list = await PluginManager.list();
-    if (!ext) return null;
-    const lower = ext.toLowerCase();
-    return list.find(p => (p.extensions || []).some(e => e.toLowerCase() === lower)) || null;
+    const name = String(fileName || '');
+    const dotIdx = name.lastIndexOf('.');
+    const ext = dotIdx >= 0 ? name.slice(dotIdx).toLowerCase() : '';
+    const buf = sampleBytes instanceof Uint8Array ? sampleBytes : (sampleBytes ? new Uint8Array(sampleBytes) : null);
+    for (const p of list) {
+      const strategies = Array.isArray(p.matchStrategy) ? p.matchStrategy : [p.matchStrategy];
+      for (const s of strategies) {
+        if (s === 'extension' && ext && (p.extensions || []).some(e => String(e).toLowerCase() === ext)) return p;
+        if (s === 'magic' && buf && PluginManager.matchMagic(buf, p.magic)) return p;
+        if (s === 'filename' && PluginManager.matchFilename(name, p.filenameRegex)) return p;
+        if (s === 'any') return p;
+      }
+    }
+    return null;
   },
 
   async getById(id) {
@@ -623,7 +683,10 @@ const PluginManager = {
       version: meta.version,
       author: meta.author || '',
       description: meta.description || '',
-      extensions: meta.extensions,
+      extensions: Array.isArray(meta.extensions) ? meta.extensions : [],
+      matchStrategy: Array.isArray(meta.matchStrategy) ? meta.matchStrategy : [meta.matchStrategy],
+      magic: Array.isArray(meta.magic) ? meta.magic.map(g => ({ offset: g.offset|0, hex: String(g.hex).toLowerCase() })) : null,
+      filenameRegex: typeof meta.filenameRegex === 'string' ? meta.filenameRegex : null,
       apiVersion: meta.api_version || PLUGIN_API_VERSION,
       fileName: PLUGIN_PREFIX + meta.id + '.js',
       installedAt: existing?.installedAt || Date.now(),
@@ -1998,10 +2061,9 @@ const Importer = {
   async processPlugin(files) {
     const sorted = files.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
     const first = sorted[0];
-    const dotIdx = first.name.lastIndexOf('.');
-    const ext = dotIdx >= 0 ? first.name.slice(dotIdx).toLowerCase() : '';
-    const pluginMeta = await PluginManager.getByExtension(ext);
-    if (!pluginMeta) throw new Error(`Tidak ada plugin terpasang untuk extension "${ext}".`);
+    const sample = new Uint8Array(await first.slice(0, 64).arrayBuffer());
+    const pluginMeta = await PluginManager.resolvePlugin(first.name, sample);
+    if (!pluginMeta) throw new Error(`Tidak ada plugin terpasang yang cocok untuk file "${first.name}".`);
     if (!Importer.assertPluginProjectType(pluginMeta)) return null;
     const plugin = await PluginManager.load(pluginMeta.id);
     const startNum = State.lines.length ? State.lines.reduce((m, l) => Math.max(m, l.line_num), 0) + 1 : 1;
@@ -2069,10 +2131,8 @@ const Importer = {
         const hasJson = files.some(f => f.name.toLowerCase().endsWith('.json'));
         const pluginMatch = await (async () => {
           for (const f of files) {
-            const dotIdx = f.name.lastIndexOf('.');
-            const ext = dotIdx >= 0 ? f.name.slice(dotIdx).toLowerCase() : '';
-            if (!ext) continue;
-            const p = await PluginManager.getByExtension(ext);
+            const sample = new Uint8Array(await f.slice(0, 64).arrayBuffer());
+            const p = await PluginManager.resolvePlugin(f.name, sample);
             if (p) return p;
           }
           return null;
@@ -3039,10 +3099,27 @@ const App = {
         const row = document.createElement('div');
         row.className = 'plugin-row';
         const exts = (p.extensions || []).map(e => escapeHtml(e)).join(' ');
+        const strategies = Array.isArray(p.matchStrategy) ? p.matchStrategy : [p.matchStrategy];
+        const stratLabel = strategies.map(s => {
+          if (s === 'extension') return 'ext';
+          if (s === 'magic') return 'magic';
+          if (s === 'filename') return 'filename';
+          if (s === 'any') return 'any';
+          return s;
+        }).join('+');
+        const stratParts = [];
+        if (strategies.includes('extension')) stratParts.push(`ext: ${exts || '-'}`);
+        if (strategies.includes('magic') && Array.isArray(p.magic) && p.magic.length) {
+          stratParts.push(`magic: ${p.magic.map(m => `@${m.offset}:${m.hex.slice(0, 12)}${m.hex.length > 12 ? '…' : ''}`).join(', ')}`);
+        }
+        if (strategies.includes('filename') && p.filenameRegex) stratParts.push(`regex: ${escapeHtml(p.filenameRegex)}`);
+        if (strategies.includes('any')) stratParts.push('any file');
+        const stratTitle = stratParts.join(' | ');
         const badges = [];
         badges.push('<span class="plugin-badge plugin-badge-worker" title="Berjalan di Web Worker">Worker</span>');
         if (p.wasm) badges.push('<span class="plugin-badge plugin-badge-wasm" title="Memakai WebAssembly">WASM</span>');
         if (Array.isArray(p.settings) && p.settings.length) badges.push('<span class="plugin-badge plugin-badge-settings" title="Punya pengaturan">Settings</span>');
+        badges.push(`<span class="plugin-badge plugin-badge-match" title="${escapeHtml(stratTitle)}">${escapeHtml(stratLabel)}</span>`);
         const hasSettings = Array.isArray(p.settings) && p.settings.length > 0;
         row.innerHTML = `
           <div class="plugin-info">
@@ -3053,7 +3130,7 @@ const App = {
             </div>
             <div class="plugin-meta">
               ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
-              <span class="plugin-exts" title="Extension yang ditangani">${exts}</span>
+              <span class="plugin-exts" title="${escapeHtml(stratTitle)}">${escapeHtml(stratLabel)}${exts ? ' · ' + exts : ''}</span>
             </div>
           </div>
           <div class="plugin-actions">
