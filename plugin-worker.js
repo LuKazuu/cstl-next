@@ -37,6 +37,57 @@
 
   const progressHook = { cb: null };
 
+  let _assetsDir = null;
+
+  async function getAssetsDir() {
+    if (_assetsDir) return _assetsDir;
+    if (!pluginId) throw new Error('Plugin belum diinisialisasi.');
+    const root = await navigator.storage.getDirectory();
+    _assetsDir = await root.getDirectoryHandle('plugin_' + pluginId + '_assets');
+    return _assetsDir;
+  }
+
+  async function resolveAssetHandle(name) {
+    const parts = String(name).replace(/\\/g, '/').split('/').filter(p => p && p !== '.' && p !== '..');
+    if (!parts.length) throw new Error('Nama file asset tidak valid: ' + name);
+    let d = await getAssetsDir();
+    for (let i = 0; i < parts.length - 1; i++) d = await d.getDirectoryHandle(parts[i]);
+    return d.getFileHandle(parts[parts.length - 1]);
+  }
+
+  async function readAssetFile(name) {
+    const fh = await resolveAssetHandle(name);
+    const f = await fh.getFile();
+    return new Uint8Array(await f.arrayBuffer());
+  }
+
+  async function readAssetText(name) {
+    const fh = await resolveAssetHandle(name);
+    return await (await fh.getFile()).text();
+  }
+
+  async function assetExists(name) {
+    try {
+      await resolveAssetHandle(name);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function listAssetFiles() {
+    const dir = await getAssetsDir();
+    const names = [];
+    const walk = async (d, prefix) => {
+      for await (const [name, h] of d.entries()) {
+        if (h.kind === 'file') names.push(prefix + name);
+        else await walk(h, prefix + name + '/');
+      }
+    };
+    await walk(dir, '');
+    return names;
+  }
+
 
   async function instantiateWasm(bytes, importObject) {
     const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -75,6 +126,11 @@
       stripNewlines,
       sanitizeName,
       progressHook: (cb) => { progressHook.cb = cb || (() => {}); },
+
+      readFile: readAssetFile,
+      readFileText: readAssetText,
+      fileExists: assetExists,
+      listFiles: listAssetFiles,
 
       WebAssembly: (typeof WebAssembly !== 'undefined') ? WebAssembly : null,
       instantiateWasm,

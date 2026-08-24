@@ -2,32 +2,20 @@
 {
   "id": "cstl-bytes-demo",
   "name": "WASM Bytes Demo (.wbin)",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": "CSTL Example",
   "api_version": 1,
   "matchStrategy": ["extension"],
   "extensions": [".wbin"],
   "wasm": true,
-  "description": "Plugin demo WebAssembly: parse format binary sederhana dengan magic bytes. Setiap record = 4-byte big-endian length + UTF-8 string."
+  "description": "Plugin demo WebAssembly: parse format binary sederhana. File parser.wasm dibaca dari asset ZIP via host.readFile."
 }
 @cstl-plugin */
-
-const WASM_B64 = "AGFzbQEAAAABCwJgAX8Bf2ACf38AAwQDAAABBQMBAAEHLwQGbWVtb3J5AgAFYWxsb2MAAAtyZWFkX3UzMl9iZQABDHdyaXRlX3UzMl9iZQACClQDBABBAAsiACAALQAAQRh0IAAtAAFBEHRqIAAtAAJBCHRqIAAtAANqCyoAIAAgAUEYdjoAACAAIAFBEHY6AAEgACABQQh2OgACIAAgAUEAdjoAAws=";
-
-function base64ToBytes(b64) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
 
 let _wasm = null;
 async function getWasm(host) {
   if (_wasm) return _wasm;
-  if (!host.WebAssembly && !host.instantiateWasm) {
-    throw new Error('WebAssembly tidak tersedia di environment ini.');
-  }
-  const bytes = base64ToBytes(WASM_B64);
+  const bytes = await host.readFile('parser.wasm');
   const instance = await host.instantiateWasm(bytes, {});
   _wasm = instance.exports;
   return _wasm;

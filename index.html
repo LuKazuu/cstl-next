@@ -258,7 +258,7 @@
   <input id="importFolderInput" type="file" accept=".json,.epub" webkitdirectory multiple hidden />
   <input id="importZipInput" type="file" accept=".zip" hidden />
   <input id="restoreProjectInput" type="file" accept=".cstl" hidden />
-  <input id="pluginFileInput" type="file" accept=".js,.cstl-plugin,.cstlplugin" hidden />
+  <input id="pluginFileInput" type="file" accept=".zip" hidden />
 
   <div id="settingsModal" class="backdrop">
     <div class="modal modal-wide" role="dialog" aria-modal="true">
@@ -533,7 +533,7 @@
         </div>
       </div>
       <div class="modal-body">
-        <p class="hint m-0 mt-1 mb-2">Import file .js plugin. Plugin yang dihapus juga menghapus project terkait.</p>
+        <p class="hint m-0 mt-1 mb-2">Import plugin .zip (berisi plugin.js + asset). Plugin yang dihapus juga menghapus project terkait.</p>
         <button id="btnInstallPlugin" class="btn btn-primary w-full mb-2">
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Import Plugin

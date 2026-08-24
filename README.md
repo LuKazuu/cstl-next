@@ -8,15 +8,22 @@ https://lukazuu.github.io/cstl-next
 
 ## CSTL-NEXT — Plugin System
 
-CSTL NEXT menambahkan sistem plugin untuk menangani format visual novel lain (selain JSON/EPUB). Plugin ditulis dalam JavaScript murni, dijalankan di **Web Worker** terisolasi, dengan dukungan **WebAssembly** opsional dan **per-plugin settings** berbasis manifest.
+CSTL NEXT menambahkan sistem plugin untuk menangani format visual novel lain (selain JSON/EPUB). Plugin dikemas sebagai **file .zip** (berisi `plugin.js` + asset), ditulis dalam JavaScript murni, dijalankan di **Web Worker** terisolasi, dengan dukungan **WebAssembly** opsional dan **per-plugin settings** berbasis manifest.
 
 ### Quick start untuk user
 
-1. Buka **Pengaturan → Plugin → Buka Plugin Manager → Import Plugin**, pilih file `.js` plugin.
-2. Plugin disimpan permanen di OPFS browser. Setelah dipasang, file dengan extension yang cocok otomatis dispatch ke plugin saat import.
+1. Buka **Pengaturan → Plugin → Buka Plugin Manager → Import Plugin**, pilih file `.zip` plugin.
+2. Plugin disimpan permanen di OPFS browser (termasuk asset seperti `.wasm`). Setelah dipasang, file dengan extension yang cocok otomatis dispatch ke plugin saat import.
 3. Saat uninstall, **cascade delete** otomatis menghapus semua project yang memakai plugin tersebut.
 
-### Struktur plugin
+### Struktur plugin (.zip)
+
+```
+my-engine.zip
+├── plugin.js          (wajib — entry + manifest)
+├── parser.wasm        (opsional — dibaca via host.readFile)
+└── data/              (opsional — nested path didukung)
+```
 
 ```js
 /* @cstl-plugin
@@ -26,6 +33,7 @@ CSTL NEXT menambahkan sistem plugin untuk menangani format visual novel lain (se
   "version": "1.0.0",
   "author": "Your Name",
   "api_version": 1,
+  "matchStrategy": ["extension"],
   "extensions": [".dat"],
   "wants_js_zip": false,
   "wasm": false,
@@ -43,10 +51,11 @@ module.exports = {
 
 ### Contoh plugin
 
-Ada di `examples/plugins/`:
-- `cstl-text-plugin.js` — plugin `.txt` minimal dengan settings
-- `cstl-csv-plugin.js` — plugin `.csv` dengan auto-detect header & quote escape
-- `cstl-wasm-demo-plugin.js` — plugin `.wbin` demo WebAssembly
+Ada di `examples/plugins/` (`.zip` siap install, `.js` adalah source):
+- `cstl-text-plugin.zip` — plugin `.txt` minimal dengan settings
+- `cstl-csv-plugin.zip` — plugin `.csv` dengan auto-detect header & quote escape
+- `cstl-magic-demo-plugin.zip` — plugin dengan magic bytes + filename regex (file tanpa extension)
+- `cstl-wasm-demo-plugin.zip` — plugin `.wbin` demo WebAssembly dengan asset `parser.wasm`
 
 ### Dokumentasi lengkap
 
@@ -74,8 +83,9 @@ cstl-next/
 └── examples/
     ├── PLUGIN_DEVELOPER_GUIDE.md
     └── plugins/
-        ├── cstl-text-plugin.js
-        ├── cstl-csv-plugin.js
-        ├── cstl-wasm-demo-plugin.js
+        ├── cstl-text-plugin.js / .zip
+        ├── cstl-csv-plugin.js / .zip
+        ├── cstl-magic-demo-plugin.js / .zip
+        ├── cstl-wasm-demo-plugin.js / .zip
         └── cstl-wasm-demo.wasm
 ```

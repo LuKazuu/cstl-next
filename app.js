@@ -305,6 +305,25 @@ const Storage = {
     const root = await Storage.root();
     await Storage.atomicWrite(root, PLUGIN_PREFIX + id + '.js', content);
   },
+  async savePluginAssets(id, files) {
+    const root = await Storage.root();
+    const dirName = PLUGIN_PREFIX + id + '_assets';
+    try { await root.removeEntry(dirName, { recursive: true }); } catch {}
+    const dir = await root.getDirectoryHandle(dirName, { create: true });
+    for (const f of files) {
+      const parts = f.name.split('/');
+      let d = dir;
+      for (let i = 0; i < parts.length - 1; i++) d = await d.getDirectoryHandle(parts[i], { create: true });
+      const fh = await d.getFileHandle(parts[parts.length - 1], { create: true });
+      const w = await fh.createWritable();
+      await w.write(f.bytes);
+      await w.close();
+    }
+  },
+  async removePluginAssets(id) {
+    const root = await Storage.root();
+    try { await root.removeEntry(PLUGIN_PREFIX + id + '_assets', { recursive: true }); } catch {}
+  },
   async loadPluginContent(id) {
     const root = await Storage.root();
     const f = await (await root.getFileHandle(PLUGIN_PREFIX + id + '.js')).getFile();
@@ -348,6 +367,7 @@ const OpfsExplorer = {
     if (name === PLUGINS_FILE) return 'plugin';
     if (name === PLUGIN_SETTINGS_FILE) return 'plugin';
     if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('.js')) return 'plugin';
+    if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('_assets')) return 'plugin';
     if (name.endsWith('.cstl')) return 'project';
     if (name.startsWith('.') && name.endsWith('.tmp')) return 'tmp';
     if (/^epub_/.test(name) || /\.(epub|epub3)$/i.test(name)) return 'epub';
@@ -664,9 +684,16 @@ const PluginManager = {
   },
 
   async install(file) {
-    const text = await file.text();
+    if (!file.name.toLowerCase().endsWith('.zip')) {
+      throw new Error('Plugin harus berupa file .zip yang berisi plugin.js di root.');
+    }
+    if (!jsZipReady()) throw new Error('JSZip tidak tersedia.');
+    const zip = await JSZip.loadAsync(file);
+    const entry = zip.file('plugin.js');
+    if (!entry) throw new Error('plugin.js tidak ditemukan di root ZIP.');
+    const text = await entry.async('string');
     const meta = PluginManager.parseManifest(text);
-    if (!meta) throw new Error('File bukan plugin CSTL yang valid. Header /* @cstl-plugin ... @cstl-plugin */ tidak ditemukan atau rusak.');
+    if (!meta) throw new Error('plugin.js bukan plugin CSTL yang valid. Header /* @cstl-plugin ... @cstl-plugin */ tidak ditemukan atau rusak.');
     if (meta.api_version && meta.api_version > PLUGIN_API_VERSION) {
       throw new Error(`Plugin memerlukan API v${meta.api_version}, host hanya mendukung v${PLUGIN_API_VERSION}.`);
     }
@@ -676,7 +703,19 @@ const PluginManager = {
         return null;
       }
     }
+    const assetFiles = [];
+    zip.forEach((path, zf) => {
+      if (zf.dir) return;
+      const clean = path.replace(/\\/g, '/').split('/').filter(p => p && p !== '.' && p !== '..').join('/');
+      if (!clean || clean === 'plugin.js' || clean.startsWith('__MACOSX/') || clean.endsWith('/.DS_Store') || clean === '.DS_Store') return;
+      assetFiles.push({ name: clean, zf });
+    });
+    const assets = [];
+    for (const a of assetFiles) {
+      assets.push({ name: a.name, bytes: new Uint8Array(await a.zf.async('arraybuffer')) });
+    }
     await Storage.savePlugin(meta.id, text);
+    await Storage.savePluginAssets(meta.id, assets);
     await Storage.upsertPluginIndex({
       id: meta.id,
       name: meta.name,
@@ -694,7 +733,8 @@ const PluginManager = {
       settings: Array.isArray(meta.settings) ? meta.settings : null,
       wantsJsZip: !!meta.wants_js_zip || !!meta.wantsJsZip,
       wasm: !!meta.wasm,
-      worker: typeof Worker !== 'undefined'
+      worker: typeof Worker !== 'undefined',
+      assets: assets.map(a => a.name)
     });
     await PluginManager.terminateWorker(meta.id);
     await PluginManager.refreshIndex();
@@ -718,6 +758,7 @@ const PluginManager = {
       try { await Storage.remove(p.id, p.epubSourceId); } catch {}
     }
     await Storage.removePluginFile(id);
+    await Storage.removePluginAssets(id);
     await Storage.removePluginIndex(id);
     await Storage.removePluginSettings(id);
     await PluginManager.terminateWorker(id);
@@ -2444,8 +2485,7 @@ const App = {
         e.preventDefault();
         pluginListEl.classList.remove('dragover');
         for (const f of Array.from(e.dataTransfer.files)) {
-          const name = f.name.toLowerCase();
-          if (name.endsWith('.js') || name.endsWith('.cstl-plugin') || name.endsWith('.cstlplugin')) {
+          if (f.name.toLowerCase().endsWith('.zip')) {
             await App.installPlugin(f);
             break;
           }
@@ -3131,6 +3171,7 @@ const App = {
             <div class="plugin-meta">
               ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
               <span class="plugin-exts" title="${escapeHtml(stratTitle)}">${escapeHtml(stratLabel)}${exts ? ' · ' + exts : ''}</span>
+              ${Array.isArray(p.assets) && p.assets.length ? `<span class="plugin-exts" title="${escapeHtml(p.assets.join('\n'))}">${p.assets.length} asset</span>` : ''}
             </div>
           </div>
           <div class="plugin-actions">

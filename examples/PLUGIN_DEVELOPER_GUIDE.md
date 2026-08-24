@@ -1,6 +1,6 @@
 # CSTL Plugin System v1
 
-CSTL mendukung **plugin** untuk menangani format visual novel yang bukan JSON/EPUB. Plugin ditulis dalam JavaScript murni, dipasang lewat menu **Pengaturan → Plugin → Buka Plugin Manager → Import Plugin**.
+CSTL mendukung **plugin** untuk menangani format visual novel yang bukan JSON/EPUB. Plugin dikemas sebagai **file .zip** (berisi `plugin.js` + asset), ditulis dalam JavaScript murni, dipasang lewat menu **Pengaturan → Plugin → Buka Plugin Manager → Import Plugin**.
 
 ## Apa yang baru di v1 (API version 1)
 
@@ -19,16 +19,26 @@ CSTL mendukung **plugin** untuk menangani format visual novel yang bukan JSON/EP
 | Komponen | Nilai |
 |---|---|
 | API version | `1` (manifest `api_version: 1`) |
-| File extension | `.js` (atau `.cstl-plugin`) |
-| Storage | OPFS (`plugin_<id>.js`) + index `_plugins.json` + settings `_plugin_settings.json` |
+| File extension | `.zip` (berisi `plugin.js` + asset) |
+| Storage | OPFS (`plugin_<id>.js` + `plugin_<id>_assets/`) + index `_plugins.json` + settings `_plugin_settings.json` |
 | Isolation | **Web Worker** per plugin (1 worker per plugin id, lazy spin-up, keep-alive). Worker wajib. |
 | Concurrency | Worker sendiri async. Plugin boleh `await` bebas. |
-| WASM | Plugin akses `host.WebAssembly` + `host.instantiateWasm(bytes, importObject)`. Bytes plugin sediakan sendiri (embedded base64 / fetch dari host). |
+| WASM | Bundle `.wasm` di ZIP, baca via `host.readFile(name)` + `host.instantiateWasm(bytes, importObject)`. |
 | Trust model | Manual install, own risk. Tidak ada signature check. User bertanggung jawab atas plugin yang dipasang. |
 
-## Format file plugin
+## Format plugin (.zip)
 
-Satu file `.js` dengan **manifest** di block comment paling atas + CommonJS export:
+Plugin adalah **ZIP package**. Entry wajib bernama `plugin.js` di root ZIP, berisi manifest di block comment paling atas + CommonJS export. File lain di dalam ZIP otomatis jadi **asset** yang bisa dibaca plugin via `host.readFile(name)`:
+
+```
+my-engine.zip
+├── plugin.js          (wajib — entry + manifest)
+├── parser.wasm        (opsional — asset bebas)
+└── data/
+    └── table.bin      (opsional — nested path didukung)
+```
+
+`plugin.js`:
 
 ```js
 /* @cstl-plugin
@@ -38,6 +48,7 @@ Satu file `.js` dengan **manifest** di block comment paling atas + CommonJS expo
   "version": "1.0.0",
   "author": "your name",
   "api_version": 1,
+  "matchStrategy": ["extension"],
   "extensions": [".rpy", ".rpym"],
   "description": "Optional, shown in UI",
   "wants_js_zip": false,
@@ -178,6 +189,10 @@ Dipanggil ketika user mengimpor file dengan extension yang cocok.
     stripNewlines(v: string|null): string|null,  // escape \n → "\\n"
     sanitizeName(s: string): string,
     progressHook(cb: (val: number, label: string) => void): void,
+    readFile(name: string): Promise<Uint8Array>,        // baca asset dari ZIP plugin (OPFS lokal)
+    readFileText(name: string): Promise<string>,       // baca asset sebagai teks
+    fileExists(name: string): Promise<boolean>,
+    listFiles(): Promise<string[]>,                    // daftar semua asset (nested path termasuk)
     WebAssembly: typeof WebAssembly | null,  // akses WebAssembly global
     instantiateWasm(bytes: Uint8Array, importObject?: object): Promise<WebAssembly.Instance>,
     isWorker: boolean,
@@ -242,17 +257,17 @@ Dipanggil ketika user klik **Export** untuk project yang berasal dari plugin.
 
 ## Lifecycle
 
-1. User buka **Pengaturan → Plugin → Import Plugin**, pilih file `.js`.
-2. CSTL parse manifest dari header. Kalau `id` sudah terpasang, minta konfirmasi timpa.
-3. File disimpan ke OPFS sebagai `plugin_<id>.js`. Entry ditambah ke `_plugins.json`.
+1. User buka **Pengaturan → Plugin → Import Plugin**, pilih file `.zip`.
+2. CSTL unzip, baca `plugin.js` di root, parse manifest. Kalau `id` sudah terpasang, minta konfirmasi timpa.
+3. `plugin.js` disimpan ke OPFS sebagai `plugin_<id>.js`. Semua file lain disimpan ke folder `plugin_<id>_assets/`. Entry ditambah ke `_plugins.json`.
 4. **Worker spin-up lazy** — saat pertama kali plugin dipanggil, satu worker dibuat untuk plugin id tersebut. Worker ini persist (keep-alive) sampai plugin di-uninstall atau tab ditutup.
 5. Saat user import file biasa dengan extension yang cocok → CSTL cari plugin → muat via worker → panggil `extract()`.
 6. Saat export → panggil `pack()` via worker → download blob.
-7. Hapus plugin → konfirmasi → **cascade delete**: semua project dengan `projectType === 'plugin'` && `pluginId === <id>` ikut dihapus permanen. Worker di-terminate.
+7. Hapus plugin → konfirmasi → **cascade delete**: semua project dengan `projectType === 'plugin'` && `pluginId === <id>` ikut dihapus permanen. Worker di-terminate, folder asset dihapus.
 
 ## WASM usage
 
-Plugin dapat pakai WASM sebagai native parser:
+Plugin dapat pakai WASM sebagai native parser. Bundle file `.wasm` di ZIP plugin, lalu baca via `host.readFile()` — sepenuhnya lokal, tanpa CDN:
 
 ```js
 /* @cstl-plugin
@@ -261,26 +276,16 @@ Plugin dapat pakai WASM sebagai native parser:
   "name": "My Engine Parser",
   "version": "1.0.0",
   "api_version": 1,
+  "matchStrategy": ["extension"],
   "extensions": [".dat"],
   "wasm": true
 }
 @cstl-plugin */
 
-// Embed WASM bytes sebagai base64 string, atau fetch dari asset URL.
-// Berikut contoh inline base64 untuk module kecil:
-const WASM_B64 = "AGFzbQEAAAA..."; // bytes asli di-encode base64
-
-function base64ToBytes(b64) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
-
 let _wasmInstance = null;
 async function getWasm(host) {
   if (_wasmInstance) return _wasmInstance;
-  const bytes = base64ToBytes(WASM_B64);
+  const bytes = await host.readFile('parser.wasm');
   _wasmInstance = await host.instantiateWasm(bytes, {
     env: {
       memory: new WebAssembly.Memory({ initial: 1 }),
@@ -293,12 +298,10 @@ async function getWasm(host) {
 module.exports = {
   async extract({ fileName, buffer, options, host }) {
     const wasm = await getWasm(host);
-    // Pass bytes ke wasm memory
     const mem = wasm.exports.memory;
     const ptr = wasm.exports.alloc(buffer.length);
     new Uint8Array(mem.buffer).set(buffer, ptr);
     const resultPtr = wasm.exports.parse(ptr, buffer.length);
-    // Read back result string...
     const text = host.decode(new Uint8Array(mem.buffer, resultPtr, 4096));
     return { lines: text.split('\n').map(m => ({ file: fileName, name: null, message: m })) };
   },
@@ -311,8 +314,9 @@ module.exports = {
 
 **Catatan**:
 - `WebAssembly` global tersedia di worker (default on). Jadi `host.WebAssembly` non-null.
-- Untuk module besar, lebih baik ship bytes sebagai array konstan (`Uint8Array.from([...])`) daripada base64 (lebih ringkas dalam code, walau ukuran file plugin besar). Base64 lebih readable.
+- File `.wasm` ukuran berapapun aman — disimpan di OPFS, di-read lazy saat pertama dipakai.
 - WASM module bisa punya import object sendiri (memory, fd_write, dll).
+- Cek asset lain: `await host.listFiles()` untuk melihat semua file yang di-bundle.
 
 ## Built-in helper `require`
 
@@ -322,9 +326,11 @@ Plugin dapat `require('jszip')` untuk akses JSZip global (kalau sudah diload ole
 
 ## Contoh
 
-Lihat folder `examples/plugins/`:
-- `cstl-text-plugin.js` — plugin `.txt` minimal, dengan heuristic "Speaker: message"
-- `cstl-csv-plugin.js` — plugin `.csv` dengan parse/quote manual, auto-detect header
+Lihat folder `examples/plugins/`. File `.zip` siap install, file `.js` adalah source:
+- `cstl-text-plugin.zip` — plugin `.txt` minimal, dengan heuristic "Speaker: message"
+- `cstl-csv-plugin.zip` — plugin `.csv` dengan parse/quote manual, auto-detect header
+- `cstl-magic-demo-plugin.zip` — plugin dengan `matchStrategy` magic bytes + filename regex (file tanpa extension)
+- `cstl-wasm-demo-plugin.zip` — plugin `.wbin` dengan WASM parser dari asset `parser.wasm`
 
 ## Yang belum didukung (roadmap berikutnya)
 
