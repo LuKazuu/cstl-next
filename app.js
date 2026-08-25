@@ -3177,15 +3177,18 @@ const App = {
         const hasSettings = Array.isArray(p.settings) && p.settings.length > 0;
         row.innerHTML = `
           <div class="plugin-head">
-            <span class="plugin-name">${escapeHtml(p.name)}</span>
-            <span class="plugin-version">v${escapeHtml(p.version)}</span>
+            <div class="plugin-head-main">
+              <span class="plugin-name">${escapeHtml(p.name)}</span>
+              <span class="plugin-version">v${escapeHtml(p.version)}</span>
+            </div>
+            ${exts ? `<span class="plugin-exts" title="${escapeHtml(stratTitle)}">${exts}</span>` : ''}
           </div>
           ${badges.length ? `<div class="plugin-badges">${badges.join('')}</div>` : ''}
+          ${(p.author || (Array.isArray(p.assets) && p.assets.length)) ? `
           <div class="plugin-meta">
             ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
-            ${exts ? `<span class="plugin-exts" title="${escapeHtml(stratTitle)}">${exts}</span>` : ''}
-            ${Array.isArray(p.assets) && p.assets.length ? `<span class="plugin-exts" title="${escapeHtml(p.assets.join('\n'))}">${p.assets.length} asset</span>` : ''}
-          </div>
+            ${Array.isArray(p.assets) && p.assets.length ? `<span class="plugin-assets" title="${escapeHtml(p.assets.join('\n'))}">${p.assets.length} asset</span>` : ''}
+          </div>` : ''}
           ${p.description ? `<div class="plugin-desc">${escapeHtml(p.description)}</div>` : ''}
           <div class="plugin-actions">
             <button class="btn btn-ghost btn-xs btn-plugin-settings" title="Atur plugin ini"${hasSettings ? '' : ' disabled'}>

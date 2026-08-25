@@ -809,15 +809,22 @@ a:focus-visible,
 .plugin-row {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
   padding: 14px 16px;
-  text-align: center;
+  text-align: left;
   border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   background: var(--surface-1);
 }
-.plugin-row .plugin-head { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; }
+.plugin-row .plugin-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 10px;
+  flex-wrap: wrap;
+}
+.plugin-row .plugin-head-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .plugin-row .plugin-name { font-weight: 600; font-size: 13.5px; color: var(--ink); }
 .plugin-row .plugin-version {
   font-family: 'JetBrains Mono', monospace;
@@ -827,16 +834,25 @@ a:focus-visible,
   border-radius: var(--r-full);
   background: var(--surface-2);
 }
+.plugin-row .plugin-head .plugin-exts {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: var(--r-full);
+  background: rgba(251,191,36,0.08);
+  border: 1px solid rgba(251,191,36,0.3);
+  font-size: 10.5px;
+}
 .plugin-row .plugin-meta {
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 4px 10px;
   font-size: 11.5px;
   color: var(--muted);
 }
 .plugin-row .plugin-author { color: var(--muted); }
-.plugin-row .plugin-exts {
+.plugin-row .plugin-exts,
+.plugin-row .plugin-assets {
   font-family: 'JetBrains Mono', monospace;
   color: #fcd34d;
 }
@@ -845,11 +861,11 @@ a:focus-visible,
   line-height: 1.55;
   color: var(--muted);
 }
-.plugin-row .plugin-actions { display: flex; justify-content: center; gap: 8px; margin-top: 2px; }
-.plugin-row .plugin-actions .btn { min-width: 104px; justify-content: center; }
+.plugin-row .plugin-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+.plugin-row .plugin-actions .btn { min-width: 96px; justify-content: center; }
 .plugin-row .btn-plugin-settings:hover:not(:disabled) { border-color: rgba(96,165,250,0.45); color: #93c5fd; }
 .plugin-row .btn-uninstall-plugin:hover:not(:disabled) { border-color: rgba(248,113,113,0.45); color: #fca5a5; }
-.plugin-badges { display: inline-flex; justify-content: center; gap: 4px; flex-wrap: wrap; }
+.plugin-badges { display: inline-flex; justify-content: flex-start; gap: 4px; flex-wrap: wrap; }
 .plugin-badge {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
