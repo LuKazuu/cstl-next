@@ -4,7 +4,6 @@
 const VERSION = 1;
 const INDEX_FILE = '_index.json';
 const PLUGINS_FILE = '_plugins.json';
-const PLUGIN_SETTINGS_FILE = '_plugin_settings.json';
 const PLUGIN_PREFIX = 'plugin_';
 const PLUGIN_API_VERSION = 1;
 const DEFAULT_PROMPT = `Translate entire text to Native English. Euphemism prohibited. Onomatopoeia must be English-based. Result must be inside codeblock. Keep line numbering and format (like code in the middle of the text) intact.`;
@@ -39,6 +38,7 @@ const STATE_SCHEMA = [
   { key: 'projectType',        def: 'uninitialized',        coerce: true },
   { key: 'pluginId',           def: null,                   coerce: true },
   { key: 'pluginData',         def: null,                   coerce: true },
+  { key: 'pluginSettings',     def: null,                   coerce: true },
   { key: 'epubTags',           def: 'p',                    coerce: true },
   { key: 'epubSourceId',       def: null,                   coerce: true },
   { key: 'prompt',             def: DEFAULT_PROMPT,         coerce: true, store: 'prompt_header' },
@@ -337,23 +337,6 @@ const Storage = {
   async listPlugins() {
     return await Storage.readPluginIndex();
   },
-  async readPluginSettings() {
-    try {
-      const root = await Storage.root();
-      const f = await (await root.getFileHandle(PLUGIN_SETTINGS_FILE)).getFile();
-      return JSON.parse(await f.text());
-    } catch { return {}; }
-  },
-  async writePluginSettings(obj) {
-    const root = await Storage.root();
-    await Storage.atomicWrite(root, PLUGIN_SETTINGS_FILE, JSON.stringify(obj || {}));
-  },
-  async removePluginSettings(id) {
-    const all = await Storage.readPluginSettings();
-    if (!all || !(id in all)) return;
-    delete all[id];
-    await Storage.writePluginSettings(all);
-  },
   async wipe() {
     const root = await navigator.storage.getDirectory();
     for await (const [name] of root.entries()) {
@@ -366,7 +349,6 @@ const OpfsExplorer = {
   classify(name) {
     if (name === INDEX_FILE) return 'index';
     if (name === PLUGINS_FILE) return 'plugin';
-    if (name === PLUGIN_SETTINGS_FILE) return 'plugin';
     if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('.js')) return 'plugin';
     if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('_assets')) return 'plugin';
     if (name.endsWith('.cstl')) return 'project';
@@ -761,7 +743,6 @@ const PluginManager = {
     await Storage.removePluginFile(id);
     await Storage.removePluginAssets(id);
     await Storage.removePluginIndex(id);
-    await Storage.removePluginSettings(id);
     await PluginManager.terminateWorker(id);
     await PluginManager.refreshIndex();
     return true;
@@ -875,24 +856,6 @@ const PluginManager = {
       }
     };
   },
-
-  async getSettings(id) {
-    const all = await Storage.readPluginSettings();
-    return (all && all[id]) || {};
-  },
-
-  async saveSettings(id, settings) {
-    const all = await Storage.readPluginSettings() || {};
-    all[id] = settings || {};
-    await Storage.writePluginSettings(all);
-  },
-
-  async resetSettings(id) {
-    const all = await Storage.readPluginSettings() || {};
-    delete all[id];
-    await Storage.writePluginSettings(all);
-  },
-
 
   applyDefaults(meta, userSettings) {
     if (!meta || !Array.isArray(meta.settings)) return { ...userSettings };
@@ -1349,6 +1312,11 @@ async function restoreOne(zip, fallbackName, onProgress) {
   if (names.length && names[names.length - 1] === '') names.pop();
   if (orig.length !== trans.length || orig.length !== names.length) throw new Error('Baris tidak sinkron.');
 
+  if (meta.projectType === 'plugin' && meta.pluginId) {
+    const installed = await PluginManager.getById(meta.pluginId);
+    if (!installed) throw Object.assign(new Error(`Plugin "${meta.pluginId}" tidak terpasang.`), { pluginMissing: true, pluginId: meta.pluginId });
+  }
+
   const total = orig.length;
   const lines = new Array(total);
   let file = 'unknown', n = 1;
@@ -1395,6 +1363,9 @@ async function restoreOne(zip, fallbackName, onProgress) {
     version: VERSION,
     projectName: name,
     projectType: meta.projectType || 'uninitialized',
+    pluginId: meta.pluginId || null,
+    pluginData: (meta.pluginData && typeof meta.pluginData === 'object') ? meta.pluginData : null,
+    pluginSettings: (meta.pluginSettings && typeof meta.pluginSettings === 'object') ? meta.pluginSettings : null,
     epubTags: meta.epubTags || 'p',
     epubSourceId: meta.epubSourceId || null,
     imported_files: meta.imported_files || [],
@@ -1437,6 +1408,7 @@ async function parseRestore(buffer, fallbackName, onProgress) {
 
   const totalEntries = entries.length;
   let ok = 0, fail = 0;
+  const missing = new Set();
   for (let i = 0; i < totalEntries; i++) {
     const entry = entries[i];
     try {
@@ -1444,11 +1416,14 @@ async function parseRestore(buffer, fallbackName, onProgress) {
       await inner.loadAsync(await entry.async('blob'));
       await restoreOne(inner, entry.name.replace(/\.cstl$/i, ''));
       ok++;
-    } catch { fail++; }
+    } catch (e) {
+      fail++;
+      if (e.pluginMissing) missing.add(e.pluginId);
+    }
     onProgress(`${i + 1} / ${totalEntries} project`, ((i + 1) / totalEntries) * 100);
     await yieldToEvent();
   }
-  return { single: false, ok, fail };
+  return { single: false, ok, fail, missing: Array.from(missing) };
 }
 
 function buildRe(query, regex, exact, caseSensitive) {
@@ -1601,6 +1576,7 @@ function cacheEls() {
     'btnPluginManagerOpen',
     'pluginManagerModal', 'btnPluginManagerClose', 'btnPluginRefresh',
     'pluginList', 'btnInstallPlugin', 'pluginFileInput',
+    'btnProjectPlugins', 'projectPluginModal', 'btnProjectPluginClose', 'projectPluginList',
     'opfsExplorerModal', 'btnOpfsExplorerOpen', 'btnOpfsExplorerClose',
     'opfsExplorer', 'opfsList', 'opfsEmpty', 'opfsLoading', 'btnOpfsRefresh',
     'busyOverlay', 'busyTitle', 'busyMsg', 'busyBarFill',
@@ -1675,11 +1651,33 @@ State.loadFromData = (data) => {
   if (!State.projectName) State.projectName = 'Unknown';
 };
 
+State.pluginSettingsFor = (pluginId) => {
+  const map = (State.pluginSettings && typeof State.pluginSettings === 'object') ? State.pluginSettings : {};
+  const v = map[pluginId];
+  return (v && typeof v === 'object') ? v : {};
+};
+
+State.setPluginSettings = (pluginId, settings) => {
+  const map = (State.pluginSettings && typeof State.pluginSettings === 'object') ? { ...State.pluginSettings } : {};
+  map[pluginId] = settings;
+  State.pluginSettings = map;
+};
+
+State.clearPluginSettings = (pluginId) => {
+  if (!State.pluginSettings || typeof State.pluginSettings !== 'object') return;
+  const map = { ...State.pluginSettings };
+  delete map[pluginId];
+  State.pluginSettings = Object.keys(map).length ? map : null;
+};
+
 State.resetTransient = () => {
   State.projectId = null;
   State.projectName = '';
   State.projectType = 'uninitialized';
   State.epubSourceId = null;
+  State.pluginId = null;
+  State.pluginData = null;
+  State.pluginSettings = null;
   State.files = [];
   State.lines = [];
   State.rows = [];
@@ -1704,6 +1702,9 @@ State.initNewProject = () => {
   State.projectType = 'uninitialized';
   State.epubTags = 'p';
   State.epubSourceId = null;
+  State.pluginId = null;
+  State.pluginData = null;
+  State.pluginSettings = null;
   State.lines = [];
   State.files = [];
   State.prompt = State.prompt || DEFAULT_PROMPT;
@@ -2114,7 +2115,7 @@ const Importer = {
     const images = [];
     let cur = startNum;
     const pluginData = State.pluginData && typeof State.pluginData === 'object' ? { ...State.pluginData } : {};
-    const userSettings = await PluginManager.getSettings(pluginMeta.id);
+    const userSettings = State.pluginSettingsFor(pluginMeta.id);
     const options = PluginManager.applyDefaults(pluginMeta, userSettings);
     Progress.determinate('Plugin: Mengimpor', `0 / ${sorted.length} file`);
     for (let i = 0; i < sorted.length; i++) {
@@ -2271,7 +2272,7 @@ const Exporter = {
       const plugin = await PluginManager.load(pluginMeta.id);
       const lines = State.lines.map(PluginManager.toPluginLine);
       const pluginData = (State.pluginData && typeof State.pluginData === 'object') ? State.pluginData : {};
-      const userSettings = await PluginManager.getSettings(pluginMeta.id);
+      const userSettings = State.pluginSettingsFor(pluginMeta.id);
       const options = PluginManager.applyDefaults(pluginMeta, userSettings);
       Progress.determinate('Plugin: Membuat output', `0 file`);
       let out;
@@ -2463,6 +2464,12 @@ const App = {
       }
     });
     els.btnPluginRefresh?.addEventListener('click', () => App.renderPluginList());
+
+    els.btnProjectPlugins?.addEventListener('click', () => {
+      toggleModal(els.projectPluginModal, true);
+      App.renderProjectPluginList();
+    });
+    els.btnProjectPluginClose?.addEventListener('click', () => toggleModal(els.projectPluginModal, false));
 
     if (els.btnInstallPlugin) {
       els.btnInstallPlugin.addEventListener('click', () => els.pluginFileInput?.click());
@@ -3146,95 +3153,117 @@ const App = {
     try {
       const plugins = await PluginManager.list();
       App.syncImportAccept(plugins);
-      if (!plugins.length) {
-        container.innerHTML = `
-          <div class="plugin-empty">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 3L11 8l-3 4H2"/></svg>
-            <span>Belum ada plugin terpasang.</span>
-          </div>`;
-        return;
-      }
-      container.innerHTML = '';
-      for (const p of plugins) {
-        const row = document.createElement('div');
-        row.className = 'plugin-row';
-        const exts = (p.extensions || []).map(e => escapeHtml(e)).join(' ');
-        const strategies = Array.isArray(p.matchStrategy) ? p.matchStrategy : [p.matchStrategy];
-        const stratLabel = strategies.map(s => {
-          if (s === 'extension') return 'ext';
-          if (s === 'magic') return 'magic';
-          if (s === 'filename') return 'filename';
-          if (s === 'any') return 'any';
-          return s;
-        }).join('+');
-        const stratParts = [];
-        if (strategies.includes('extension')) stratParts.push(`ext: ${exts || '-'}`);
-        if (strategies.includes('magic') && Array.isArray(p.magic) && p.magic.length) {
-          stratParts.push(`magic: ${p.magic.map(m => `@${m.offset}:${m.hex.slice(0, 12)}${m.hex.length > 12 ? '…' : ''}`).join(', ')}`);
-        }
-        if (strategies.includes('filename') && p.filenameRegex) stratParts.push(`regex: ${escapeHtml(p.filenameRegex)}`);
-        if (strategies.includes('any')) stratParts.push('any file');
-        const stratTitle = stratParts.join(' | ');
-        const badges = [];
-        badges.push('<span class="plugin-badge plugin-badge-worker" title="Berjalan di Web Worker">Worker</span>');
-        if (p.wasm) badges.push('<span class="plugin-badge plugin-badge-wasm" title="Memakai WebAssembly">WASM</span>');
-        if (Array.isArray(p.settings) && p.settings.length) badges.push('<span class="plugin-badge plugin-badge-settings" title="Punya pengaturan">Settings</span>');
-        badges.push(`<span class="plugin-badge plugin-badge-match" title="${escapeHtml(stratTitle)}">${escapeHtml(stratLabel)}</span>`);
-        const hasSettings = Array.isArray(p.settings) && p.settings.length > 0;
-        row.innerHTML = `
-          <div class="plugin-head">
-            <div class="plugin-head-main">
-              <span class="plugin-name">${escapeHtml(p.name)}</span>
-              <span class="plugin-version">v${escapeHtml(p.version)}</span>
-            </div>
-            ${exts ? `<span class="plugin-exts" title="${escapeHtml(stratTitle)}">${exts}</span>` : ''}
-          </div>
-          ${badges.length ? `<div class="plugin-badges">${badges.join('')}</div>` : ''}
-          ${(p.author || (Array.isArray(p.assets) && p.assets.length)) ? `
-          <div class="plugin-meta">
-            ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
-            ${Array.isArray(p.assets) && p.assets.length ? `<span class="plugin-assets" title="${escapeHtml(p.assets.join('\n'))}">${p.assets.length} asset</span>` : ''}
-          </div>` : ''}
-          ${p.description ? `<div class="plugin-desc">${escapeHtml(p.description)}</div>` : ''}
-          <div class="plugin-actions">
-            <button class="btn btn-ghost btn-xs btn-plugin-settings" title="Atur plugin ini"${hasSettings ? '' : ' disabled'}>
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-              Atur
-            </button>
-            <button class="btn btn-ghost btn-xs btn-uninstall-plugin" title="Hapus plugin dan project terkait">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.4 14.1A2 2 0 0 1 15.6 22H8.4a2 2 0 0 1-2-1.9L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
-              Hapus
-            </button>
-          </div>
-        `;
-        const uninstallBtn = row.querySelector('.btn-uninstall-plugin');
-        if (uninstallBtn) uninstallBtn.addEventListener('click', async () => {
-          try {
-            const ok = await PluginManager.uninstall(p.id);
-            if (ok) {
-              await App.renderPluginList();
-              await App.loadDashboard();
-              App.flash(`Plugin "${p.name}" dan project terkait dihapus.`);
-            }
-          } catch (e) {
-            alert('Gagal menghapus plugin: ' + e.message);
-          }
-        });
-        const settingsBtn = row.querySelector('.btn-plugin-settings');
-        if (settingsBtn) settingsBtn.addEventListener('click', () => App.openPluginSettings(p));
-        container.appendChild(row);
-      }
+      App.renderPluginCards(container, plugins, { uninstall: true });
     } catch (e) {
       container.innerHTML = `<p class="hint" style="color:var(--danger);">Gagal memuat daftar plugin: ${escapeHtml(e.message)}</p>`;
     }
   },
 
-  async openPluginSettings(pluginMeta) {
+  async renderProjectPluginList() {
+    const container = els.projectPluginList;
+    if (!container) return;
+    try {
+      const plugins = await PluginManager.list();
+      App.renderPluginCards(container, plugins, { settings: true });
+    } catch (e) {
+      container.innerHTML = `<p class="hint" style="color:var(--danger);">Gagal memuat daftar plugin: ${escapeHtml(e.message)}</p>`;
+    }
+  },
+
+  renderPluginCards(container, plugins, opts = {}) {
+    if (!container) return;
+    if (!plugins.length) {
+      container.innerHTML = `
+          <div class="plugin-empty">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 3L11 8l-3 4H2"/></svg>
+            <span>Belum ada plugin terpasang.</span>
+          </div>`;
+      return;
+    }
+    container.innerHTML = '';
+    for (const p of plugins) {
+      const row = document.createElement('div');
+      row.className = 'plugin-row';
+      const exts = (p.extensions || []).map(e => escapeHtml(e)).join(' ');
+      const strategies = Array.isArray(p.matchStrategy) ? p.matchStrategy : [p.matchStrategy];
+      const stratLabel = strategies.map(s => {
+        if (s === 'extension') return 'ext';
+        if (s === 'magic') return 'magic';
+        if (s === 'filename') return 'filename';
+        if (s === 'any') return 'any';
+        return s;
+      }).join('+');
+      const stratParts = [];
+      if (strategies.includes('extension')) stratParts.push(`ext: ${exts || '-'}`);
+      if (strategies.includes('magic') && Array.isArray(p.magic) && p.magic.length) {
+        stratParts.push(`magic: ${p.magic.map(m => `@${m.offset}:${m.hex.slice(0, 12)}${m.hex.length > 12 ? '…' : ''}`).join(', ')}`);
+      }
+      if (strategies.includes('filename') && p.filenameRegex) stratParts.push(`regex: ${escapeHtml(p.filenameRegex)}`);
+      if (strategies.includes('any')) stratParts.push('any file');
+      const stratTitle = stratParts.join(' | ');
+      const badges = [];
+      badges.push('<span class="plugin-badge plugin-badge-worker" title="Berjalan di Web Worker">Worker</span>');
+      if (p.wasm) badges.push('<span class="plugin-badge plugin-badge-wasm" title="Memakai WebAssembly">WASM</span>');
+      if (Array.isArray(p.settings) && p.settings.length) badges.push('<span class="plugin-badge plugin-badge-settings" title="Punya pengaturan">Settings</span>');
+      badges.push(`<span class="plugin-badge plugin-badge-match" title="${escapeHtml(stratTitle)}">${escapeHtml(stratLabel)}</span>`);
+      const hasSettings = Array.isArray(p.settings) && p.settings.length > 0;
+      const actions = [];
+      if (opts.settings) {
+        actions.push(`
+          <button class="btn btn-ghost btn-xs btn-plugin-settings" title="Atur plugin ini"${hasSettings ? '' : ' disabled'}>
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            Atur
+          </button>`);
+      }
+      if (opts.uninstall) {
+        actions.push(`
+          <button class="btn btn-ghost btn-xs btn-uninstall-plugin" title="Hapus plugin dan project terkait">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.4 14.1A2 2 0 0 1 15.6 22H8.4a2 2 0 0 1-2-1.9L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
+            Hapus
+          </button>`);
+      }
+      row.innerHTML = `
+        <div class="plugin-head">
+          <div class="plugin-head-main">
+            <span class="plugin-name">${escapeHtml(p.name)}</span>
+            <span class="plugin-version">v${escapeHtml(p.version)}</span>
+          </div>
+          ${exts ? `<span class="plugin-exts" title="${escapeHtml(stratTitle)}">${exts}</span>` : ''}
+        </div>
+        ${badges.length ? `<div class="plugin-badges">${badges.join('')}</div>` : ''}
+        ${(p.author || (Array.isArray(p.assets) && p.assets.length)) ? `
+        <div class="plugin-meta">
+          ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
+          ${Array.isArray(p.assets) && p.assets.length ? `<span class="plugin-assets" title="${escapeHtml(p.assets.join('\n'))}">${p.assets.length} asset</span>` : ''}
+        </div>` : ''}
+        ${p.description ? `<div class="plugin-desc">${escapeHtml(p.description)}</div>` : ''}
+        ${actions.length ? `<div class="plugin-actions">${actions.join('')}</div>` : ''}
+      `;
+      const uninstallBtn = row.querySelector('.btn-uninstall-plugin');
+      if (uninstallBtn) uninstallBtn.addEventListener('click', async () => {
+        try {
+          const ok = await PluginManager.uninstall(p.id);
+          if (ok) {
+            await App.renderPluginList();
+            await App.loadDashboard();
+            App.flash(`Plugin "${p.name}" dan project terkait dihapus.`);
+          }
+        } catch (e) {
+          alert('Gagal menghapus plugin: ' + e.message);
+        }
+      });
+      const settingsBtn = row.querySelector('.btn-plugin-settings');
+      if (settingsBtn) settingsBtn.addEventListener('click', () => App.openPluginSettings(p));
+      container.appendChild(row);
+    }
+  },
+
+  openPluginSettings(pluginMeta) {
     if (!Array.isArray(pluginMeta.settings) || !pluginMeta.settings.length) {
       alert('Plugin ini tidak memiliki pengaturan.');
       return;
     }
-    const userSettings = await PluginManager.getSettings(pluginMeta.id);
+    const userSettings = State.pluginSettingsFor(pluginMeta.id);
     const merged = PluginManager.applyDefaults(pluginMeta, userSettings);
     const form = document.createElement('div');
     form.className = 'plugin-settings-form';
@@ -3290,7 +3319,7 @@ const App = {
       setTimeout(() => overlay.remove(), MODAL_CLOSE_MS);
     };
     overlay.querySelector('.btn-plugin-settings-cancel').addEventListener('click', close);
-    overlay.querySelector('.btn-plugin-settings-save').addEventListener('click', async () => {
+    overlay.querySelector('.btn-plugin-settings-save').addEventListener('click', () => {
       const out = {};
       for (const s of pluginMeta.settings) {
         const id = `pluginSetting_${pluginMeta.id}_${s.key}`;
@@ -3303,13 +3332,15 @@ const App = {
         else v = el.value;
         out[s.key] = v;
       }
-      await PluginManager.saveSettings(pluginMeta.id, out);
+      State.setPluginSettings(pluginMeta.id, out);
+      State.queueSave();
       close();
-      App.flash(`Pengaturan plugin "${pluginMeta.name}" disimpan.`);
+      App.flash(`Pengaturan plugin "${pluginMeta.name}" untuk project ini disimpan.`);
     });
-    overlay.querySelector('.btn-plugin-settings-reset').addEventListener('click', async () => {
+    overlay.querySelector('.btn-plugin-settings-reset').addEventListener('click', () => {
       if (!confirm('Reset pengaturan plugin ke nilai default?')) return;
-      await PluginManager.resetSettings(pluginMeta.id);
+      State.clearPluginSettings(pluginMeta.id);
+      State.queueSave();
       close();
       App.openPluginSettings(pluginMeta);
     });
@@ -3636,10 +3667,14 @@ const App = {
       const r = await parseRestore(await uploadedFile.arrayBuffer(), uploadedFile.name.replace(/\.cstl$/i, ''), Progress.update);
       await App.loadDashboard();
       return r;
-    }, e => 'File korup: ' + e.message);
+    }, e => e.pluginMissing ? e.message : 'File korup: ' + e.message);
     if (result) {
       if (result.single) alert(`Project "${result.name}" dipulihkan!`);
-      else alert(`${result.ok} project berhasil dipulihkan${result.fail ? `, ${result.fail} gagal` : ''}.`);
+      else {
+        let msg = `${result.ok} project berhasil dipulihkan${result.fail ? `, ${result.fail} gagal` : ''}.`;
+        if (result.missing?.length) msg += `\nPlugin tidak terpasang: ${result.missing.join(', ')}.`;
+        alert(msg);
+      }
     }
     e.target.value = '';
   },

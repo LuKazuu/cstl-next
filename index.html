@@ -161,6 +161,10 @@
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
               Context
             </button>
+            <button id="btnProjectPlugins" class="btn" title="Plugin" aria-label="Plugin">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h4.5a2.5 2.5 0 1 1 5 0H19v4.5a2.5 2.5 0 1 1 0 5V19h-4.5a2.5 2.5 0 1 0-5 0H5v-4.5a2.5 2.5 0 1 0 0-5z"/></svg>
+              <span class="btn-text">Plugin</span>
+            </button>
             <button id="btnSettings" class="btn" title="Pengaturan" aria-label="Pengaturan">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
               <span class="btn-text">Pengaturan</span>
@@ -543,6 +547,20 @@
       <div class="modal-actions">
         <span class="grow"></span>
         <button id="btnPluginManagerClose" class="btn btn-ghost">Tutup</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="projectPluginModal" class="backdrop">
+    <div class="modal modal-wide" role="dialog" aria-modal="true">
+      <div class="modal-head"><h3>Plugin</h3></div>
+      <div class="modal-body">
+        <p class="hint m-0 mt-1 mb-2">Pengaturan plugin di sini hanya berlaku untuk project aktif. Pasang atau hapus plugin dari Plugin Manager di halaman utama.</p>
+        <div id="projectPluginList" class="plugin-list"></div>
+      </div>
+      <div class="modal-actions">
+        <span class="grow"></span>
+        <button id="btnProjectPluginClose" class="btn btn-ghost">Tutup</button>
       </div>
     </div>
   </div>
