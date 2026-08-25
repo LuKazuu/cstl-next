@@ -3176,23 +3176,22 @@ const App = {
         badges.push(`<span class="plugin-badge plugin-badge-match" title="${escapeHtml(stratTitle)}">${escapeHtml(stratLabel)}</span>`);
         const hasSettings = Array.isArray(p.settings) && p.settings.length > 0;
         row.innerHTML = `
-          <div class="plugin-info">
-            <div class="plugin-head">
-              <span class="plugin-name">${escapeHtml(p.name)}</span>
-              <span class="plugin-version">v${escapeHtml(p.version)}</span>
-              ${badges.length ? `<span class="plugin-badges">${badges.join('')}</span>` : ''}
-            </div>
-            <div class="plugin-meta">
-              ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
-              <span class="plugin-exts" title="${escapeHtml(stratTitle)}">${escapeHtml(stratLabel)}${exts ? ' · ' + exts : ''}</span>
-              ${Array.isArray(p.assets) && p.assets.length ? `<span class="plugin-exts" title="${escapeHtml(p.assets.join('\n'))}">${p.assets.length} asset</span>` : ''}
-            </div>
+          <div class="plugin-head">
+            <span class="plugin-name">${escapeHtml(p.name)}</span>
+            <span class="plugin-version">v${escapeHtml(p.version)}</span>
           </div>
+          ${badges.length ? `<div class="plugin-badges">${badges.join('')}</div>` : ''}
+          <div class="plugin-meta">
+            ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
+            ${exts ? `<span class="plugin-exts" title="${escapeHtml(stratTitle)}">${exts}</span>` : ''}
+            ${Array.isArray(p.assets) && p.assets.length ? `<span class="plugin-exts" title="${escapeHtml(p.assets.join('\n'))}">${p.assets.length} asset</span>` : ''}
+          </div>
+          ${p.description ? `<div class="plugin-desc">${escapeHtml(p.description)}</div>` : ''}
           <div class="plugin-actions">
-            ${hasSettings ? `<button class="btn btn-ghost btn-xs btn-plugin-settings" title="Atur plugin ini">
+            <button class="btn btn-ghost btn-xs btn-plugin-settings" title="Atur plugin ini"${hasSettings ? '' : ' disabled'}>
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
               Atur
-            </button>` : ''}
+            </button>
             <button class="btn btn-ghost btn-xs btn-uninstall-plugin" title="Hapus plugin dan project terkait">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.4 14.1A2 2 0 0 1 15.6 22H8.4a2 2 0 0 1-2-1.9L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
               Hapus
