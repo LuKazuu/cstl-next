@@ -4136,6 +4136,9 @@ const App = {
     if (!tagMatch) {
       return { results: [], errors: ['Tidak ditemukan tag <translate>...</translate>.'], seen: new Set(), ringkasan: null };
     }
+    if ((text.match(/<translate>/gi) || []).length > 1) {
+      return { results: [], errors: ['Ditemukan lebih dari satu tag <translate>...</translate>.'], seen: new Set(), ringkasan: null };
+    }
     const before = text.slice(0, tagMatch.index).trim();
     const after = text.slice(tagMatch.index + tagMatch[0].length).trim();
     const ringkasan = [before, after].filter(Boolean).join('\n\n').trim() || null;
