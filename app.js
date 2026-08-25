@@ -4,6 +4,7 @@
 const VERSION = 1;
 const INDEX_FILE = '_index.json';
 const PLUGINS_FILE = '_plugins.json';
+const PLUGIN_SETTINGS_FILE = '_plugin_settings.json';
 const PLUGIN_PREFIX = 'plugin_';
 const PLUGIN_API_VERSION = 1;
 const DEFAULT_PROMPT = `Translate entire text to Native English. Euphemism prohibited. Onomatopoeia must be English-based. Result must be inside codeblock. Keep line numbering and format (like code in the middle of the text) intact.`;
@@ -354,6 +355,7 @@ const OpfsExplorer = {
     }
     if (name === INDEX_FILE) return 'index';
     if (name === PLUGINS_FILE) return 'plugin';
+    if (name === PLUGIN_SETTINGS_FILE) return 'plugin';
     if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('.js')) return 'plugin';
     if (name.endsWith('.cstl')) return 'project';
     if (name.startsWith('.') && name.endsWith('.tmp')) return 'tmp';

@@ -851,11 +851,11 @@ a:focus-visible,
   color: var(--muted);
 }
 .plugin-row .plugin-author { color: var(--muted); }
-.plugin-row .plugin-exts,
-.plugin-row .plugin-assets {
+.plugin-row .plugin-exts {
   font-family: 'JetBrains Mono', monospace;
   color: #fcd34d;
 }
+.plugin-row .plugin-assets { color: #fcd34d; }
 .plugin-row .plugin-desc {
   font-size: 11.5px;
   line-height: 1.55;
