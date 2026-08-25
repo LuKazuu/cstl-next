@@ -2126,6 +2126,31 @@ select:hover:not(:disabled) { border-color: var(--hairline-3); }
   overscroll-behavior: contain;
 }
 
+.opfs-crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+}
+.opfs-crumb {
+  border: none;
+  background: transparent;
+  padding: 3px 7px;
+  border-radius: var(--r-sm);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color var(--d1) var(--ease), color var(--d1) var(--ease);
+}
+.opfs-crumb:hover { background: var(--surface-2); color: var(--ink); }
+.opfs-crumb.current { color: var(--ink); font-weight: 600; cursor: default; }
+.opfs-crumb.current:hover { background: transparent; }
+.opfs-crumb-sep { color: var(--hairline-3); font-size: 11px; }
+
 .opfs-item {
   display: grid;
   grid-template-columns: 28px 1fr auto;
@@ -2153,6 +2178,10 @@ select:hover:not(:disabled) { border-color: var(--hairline-3); }
 .opfs-item-icon.kind-epub { color: var(--success); background: var(--success-soft); }
 .opfs-item-icon.kind-index { color: var(--ink-dim); background: var(--surface-2); }
 .opfs-item-icon.kind-tmp { color: var(--danger); background: var(--danger-soft); }
+.opfs-item-icon.kind-folder { color: var(--accent); background: var(--accent-tint); }
+
+.opfs-item.is-dir .opfs-item-info { cursor: pointer; }
+.opfs-item.is-dir .opfs-item-info:hover .opfs-item-name { color: var(--accent); }
 
 .opfs-item-info {
   min-width: 0;
@@ -2197,6 +2226,7 @@ select:hover:not(:disabled) { border-color: var(--hairline-3); }
 .opfs-item-meta .opfs-tag.kind-epub { color: var(--success); background: var(--success-soft); }
 .opfs-item-meta .opfs-tag.kind-index { color: var(--ink-dim); background: var(--surface-2); }
 .opfs-item-meta .opfs-tag.kind-tmp { color: var(--danger); background: var(--danger-soft); }
+.opfs-item-meta .opfs-tag.kind-folder { color: var(--accent); background: var(--accent-tint); }
 
 .opfs-item-actions {
   display: flex;

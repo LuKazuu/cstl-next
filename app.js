@@ -346,11 +346,15 @@ const Storage = {
 };
 
 const OpfsExplorer = {
-  classify(name) {
+  path: [],
+  classify(name, isDir) {
+    if (isDir) {
+      if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('_assets')) return 'plugin';
+      return 'folder';
+    }
     if (name === INDEX_FILE) return 'index';
     if (name === PLUGINS_FILE) return 'plugin';
     if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('.js')) return 'plugin';
-    if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('_assets')) return 'plugin';
     if (name.endsWith('.cstl')) return 'project';
     if (name.startsWith('.') && name.endsWith('.tmp')) return 'tmp';
     if (/^epub_/.test(name) || /\.(epub|epub3)$/i.test(name)) return 'epub';
@@ -361,12 +365,16 @@ const OpfsExplorer = {
       project: 'Project',
       epub: 'EPUB',
       plugin: 'Plugin',
+      folder: 'Folder',
       index: 'Index',
       tmp: 'Tmp',
       other: 'File'
     })[kind] || 'File';
   },
-  kindIconSvg(kind) {
+  kindIconSvg(kind, isDir) {
+    if (isDir) {
+      return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+    }
     if (kind === 'project') {
       return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>';
     }
@@ -402,22 +410,37 @@ const OpfsExplorer = {
   escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   },
-  async listAll() {
+  async dirHandle(path) {
+    let dir = await navigator.storage.getDirectory();
+    for (const part of path) dir = await dir.getDirectoryHandle(part);
+    return dir;
+  },
+  async listDir() {
     if (!navigator.storage?.getDirectory) return [];
-    const root = await navigator.storage.getDirectory();
+    const dir = await this.dirHandle(this.path);
     const out = [];
-    for await (const [name, handle] of root.entries()) {
-      if (handle.kind !== 'file') continue;
-      let size = 0, lastModified = 0;
-      try {
-        const file = await handle.getFile();
-        size = file.size;
-        lastModified = file.lastModified;
-      } catch {}
-      out.push({ name, size, lastModified, kind: this.classify(name) });
+    for await (const [name, handle] of dir.entries()) {
+      const isDir = handle.kind === 'directory';
+      const item = { name, isDir, kind: this.classify(name, isDir), size: null, lastModified: 0, count: null };
+      if (isDir) {
+        try {
+          let n = 0;
+          for await (const [, child] of handle.entries()) n++;
+          item.count = n;
+        } catch {}
+      } else {
+        try {
+          const file = await handle.getFile();
+          item.size = file.size;
+          item.lastModified = file.lastModified;
+        } catch {}
+      }
+      out.push(item);
     }
     const kindPriority = { project: 0, epub: 1, plugin: 2, other: 3, index: 4, tmp: 5 };
     out.sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      if (a.isDir) return a.name.localeCompare(b.name);
       const p = (kindPriority[a.kind] ?? 2) - (kindPriority[b.kind] ?? 2);
       if (p !== 0) return p;
       return a.name.localeCompare(b.name);
@@ -430,7 +453,37 @@ const OpfsExplorer = {
   },
   _showEmpty(show) {
     if (!els.opfsEmpty) return;
+    if (show && els.opfsEmptyText) {
+      els.opfsEmptyText.textContent = this.path.length ? 'Folder ini kosong.' : 'Belum ada file di OPFS.';
+    }
     els.opfsEmpty.hidden = !show;
+  },
+  _renderCrumbs() {
+    if (!els.opfsCrumbs) return;
+    els.opfsCrumbs.hidden = !this.path.length;
+    els.opfsCrumbs.innerHTML = '';
+    if (!this.path.length) return;
+    const frag = document.createDocumentFragment();
+    const mkCrumb = (label, depth) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'opfs-crumb' + (depth === this.path.length ? ' current' : '');
+      b.textContent = label;
+      b.addEventListener('click', () => {
+        this.path = this.path.slice(0, depth);
+        this.refresh();
+      });
+      return b;
+    };
+    frag.appendChild(mkCrumb('OPFS', 0));
+    this.path.forEach((seg, i) => {
+      const sep = document.createElement('span');
+      sep.className = 'opfs-crumb-sep';
+      sep.textContent = '/';
+      frag.appendChild(sep);
+      frag.appendChild(mkCrumb(seg, i + 1));
+    });
+    els.opfsCrumbs.appendChild(frag);
   },
   async refresh() {
     if (!els.opfsList) return;
@@ -449,8 +502,9 @@ const OpfsExplorer = {
     this._showEmpty(false);
     els.opfsList.innerHTML = '';
     try {
-      const items = await this.listAll();
+      const items = await this.listDir();
       this._showLoading(false);
+      this._renderCrumbs();
       if (!items.length) {
         this._showEmpty(true);
         return;
@@ -472,28 +526,32 @@ const OpfsExplorer = {
   },
   _renderItem(item) {
     const row = document.createElement('div');
-    row.className = 'opfs-item';
+    row.className = 'opfs-item' + (item.isDir ? ' is-dir' : '');
     row.setAttribute('role', 'listitem');
     row.dataset.name = item.name;
     row.dataset.kind = item.kind;
-    const downloadTitle = item.kind === 'tmp'
-      ? 'File tmp mungkin tidak utuh — unduh dengan hati-hati'
-      : 'Unduh file';
+    row.dataset.dir = item.isDir ? '1' : '0';
+    const downloadTitle = item.isDir
+      ? 'Folder tidak dapat diunduh'
+      : item.kind === 'tmp'
+        ? 'File tmp mungkin tidak utuh — unduh dengan hati-hati'
+        : 'Unduh file';
+    const sizeLabel = item.isDir ? (item.count + ' item') : this.formatSize(item.size);
     row.innerHTML = `
-      <div class="opfs-item-icon kind-${item.kind}" aria-hidden="true">${this.kindIconSvg(item.kind)}</div>
-      <div class="opfs-item-info">
+      <div class="opfs-item-icon kind-${item.isDir ? 'folder' : item.kind}" aria-hidden="true">${this.kindIconSvg(item.kind, item.isDir)}</div>
+      <div class="opfs-item-info"${item.isDir ? ' data-action="open" title="Buka folder"' : ''}>
         <span class="opfs-item-name" title="${this.escapeHtml(item.name)}">${this.escapeHtml(item.name)}</span>
         <div class="opfs-item-meta">
           <span class="opfs-tag kind-${item.kind}">${this.kindLabel(item.kind)}</span>
-          <span class="opfs-meta-size">${this.formatSize(item.size)}</span>
+          <span class="opfs-meta-size">${sizeLabel}</span>
           ${item.lastModified ? `<span class="opfs-meta-date" title="Terakhir diubah">${this.formatDate(item.lastModified)}</span>` : ''}
         </div>
       </div>
       <div class="opfs-item-actions">
-        <button type="button" class="opfs-item-btn opfs-download" aria-label="Unduh ${this.escapeHtml(item.name)}" title="${downloadTitle}" data-action="download">
+        <button type="button" class="opfs-item-btn opfs-download" aria-label="Unduh ${this.escapeHtml(item.name)}" title="${downloadTitle}" data-action="download"${item.isDir ? ' disabled' : ''}>
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         </button>
-        <button type="button" class="opfs-item-btn danger opfs-delete" aria-label="Hapus ${this.escapeHtml(item.name)}" title="Hapus file" data-action="delete">
+        <button type="button" class="opfs-item-btn danger opfs-delete" aria-label="Hapus ${this.escapeHtml(item.name)}" title="${item.isDir ? 'Hapus folder' : 'Hapus file'}" data-action="delete">
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
         </button>
       </div>
@@ -502,8 +560,8 @@ const OpfsExplorer = {
   },
   async download(name) {
     try {
-      const root = await navigator.storage.getDirectory();
-      const handle = await root.getFileHandle(name);
+      const dir = await this.dirHandle(this.path);
+      const handle = await dir.getFileHandle(name);
       const file = await handle.getFile();
       const url = URL.createObjectURL(file);
       download(url, name);
@@ -511,20 +569,24 @@ const OpfsExplorer = {
       alert('Gagal mengunduh "' + name + '": ' + (e?.message || e));
     }
   },
-  async remove(name) {
-    const kind = this.classify(name);
+  async remove(name, isDir) {
+    const kind = this.classify(name, isDir);
     const warnings = {
       project: 'Ini adalah file project (.cstl). Project akan hilang dari dashboard setelah dihapus.',
       epub: 'Ini adalah file EPUB yang dipakai project. Project terkait mungkin tidak bisa menampilkan gambar lagi.',
+      plugin: isDir
+        ? 'Folder ini berisi aset plugin. Plugin terkait mungkin tidak berfungsi normal.'
+        : 'Ini adalah file plugin. Plugin terkait akan berhenti berfungsi.',
       index: 'Ini adalah file index internal. Aplikasi akan membangun ulang index otomatis saat dibuka.',
       tmp: 'Ini adalah file sementara dari operasi tulis yang gagal. Aman untuk dihapus.',
+      folder: 'Folder ini dan seluruh isinya akan dihapus.',
       other: 'File ini tidak dikenali. Hapus jika Anda yakin.'
     };
     const warning = warnings[kind] || warnings.other;
     if (!confirm(`Hapus "${name}" dari OPFS?\n\n${warning}\n\nTindakan ini tidak dapat dibatalkan.`)) return;
     try {
-      const root = await navigator.storage.getDirectory();
-      await root.removeEntry(name, { recursive: false });
+      const dir = await this.dirHandle(this.path);
+      await dir.removeEntry(name, { recursive: !!isDir });
       const row = els.opfsList?.querySelector(`.opfs-item[data-name="${CSS.escape(name)}"]`);
       if (row) row.remove();
       if (els.opfsList && !els.opfsList.children.length) {
@@ -534,16 +596,21 @@ const OpfsExplorer = {
       alert('Gagal menghapus "' + name + '": ' + (e?.message || e));
     }
   },
+  open(name) {
+    this.path.push(name);
+    this.refresh();
+  },
   handleClick(e) {
-    const btn = e.target.closest('.opfs-item-btn[data-action]');
+    const btn = e.target.closest('[data-action]');
     if (!btn) return;
     const row = btn.closest('.opfs-item');
     if (!row) return;
     const name = row.dataset.name;
     if (!name) return;
     const action = btn.dataset.action;
-    if (action === 'download') this.download(name);
-    else if (action === 'delete') this.remove(name);
+    if (action === 'open') this.open(name);
+    else if (action === 'download') this.download(name);
+    else if (action === 'delete') this.remove(name, row.dataset.dir === '1');
   }
 };
 
@@ -1578,7 +1645,7 @@ function cacheEls() {
     'pluginList', 'btnInstallPlugin', 'pluginFileInput',
     'btnProjectPlugins', 'projectPluginModal', 'btnProjectPluginClose', 'projectPluginList',
     'opfsExplorerModal', 'btnOpfsExplorerOpen', 'btnOpfsExplorerClose',
-    'opfsExplorer', 'opfsList', 'opfsEmpty', 'opfsLoading', 'btnOpfsRefresh',
+    'opfsExplorer', 'opfsList', 'opfsEmpty', 'opfsEmptyText', 'opfsCrumbs', 'opfsLoading', 'btnOpfsRefresh',
     'busyOverlay', 'busyTitle', 'busyMsg', 'busyBarFill',
     'bookmarkDock', 'btnBookmarks', 'bookmarkPanel',
     'bookmarkPanelCount', 'bookmarkList', 'btnBookmarkClear'
@@ -2442,6 +2509,7 @@ const App = {
 
     els.btnOpfsExplorerOpen?.addEventListener('click', () => {
       toggleModal(els.opfsExplorerModal, true);
+      OpfsExplorer.path = [];
       OpfsExplorer.refresh();
     });
     els.btnOpfsExplorerClose?.addEventListener('click', () => {
