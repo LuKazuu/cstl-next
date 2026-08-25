@@ -3121,11 +3121,25 @@ const App = {
     if (App.main) requestAnimationFrame(() => { App.main.invalidate(); App.main.render(); });
   },
 
+  syncImportAccept(plugins) {
+    const exts = new Set(['.json', '.epub']);
+    for (const p of plugins || []) {
+      for (const e of (p.extensions || [])) {
+        const v = String(e).trim().toLowerCase();
+        if (v.startsWith('.')) exts.add(v);
+      }
+    }
+    const accept = Array.from(exts).join(',');
+    if (els.importFileInput) els.importFileInput.accept = accept;
+    if (els.importFolderInput) els.importFolderInput.accept = accept;
+  },
+
   async renderPluginList() {
     const container = els.pluginList;
     if (!container) return;
     try {
       const plugins = await PluginManager.list();
+      App.syncImportAccept(plugins);
       if (!plugins.length) {
         container.innerHTML = `
           <div class="plugin-empty">
@@ -3247,7 +3261,7 @@ const App = {
     }
 
     const overlay = document.createElement('div');
-    overlay.className = 'backdrop';
+    overlay.className = 'backdrop backdrop-top';
     overlay.innerHTML = `
       <div class="modal modal-wide" role="dialog" aria-modal="true">
         <div class="modal-head"><h3>Pengaturan Plugin: ${escapeHtml(pluginMeta.name)}</h3></div>

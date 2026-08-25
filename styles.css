@@ -1537,6 +1537,7 @@ select:hover:not(:disabled) { border-color: var(--hairline-3); }
 #dashboardSettingsModal { z-index: 60; }
 #opfsExplorerModal { z-index: 63; }
 #pluginManagerModal { z-index: 64; }
+.backdrop-top { z-index: 70; }
 
 .modal {
   width: 100%;
