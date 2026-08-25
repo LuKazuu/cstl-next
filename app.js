@@ -2134,7 +2134,12 @@ const Importer = {
       if (!out || !Array.isArray(out.lines)) throw new Error(`Plugin "${pluginMeta.name}" tidak mengembalikan lines array.`);
       const lines = PluginManager.normalizePluginLines(out.lines, cur);
       for (const l of lines) l.file = l.file || bn;
-      if (lines.length) { existing.add(bn); imported.push(...lines); cur += lines.length; }
+      if (lines.length) {
+        existing.add(bn);
+        for (const l of lines) existing.add(l.file);
+        imported.push(...lines);
+        cur += lines.length;
+      }
       if (out.sourceMap) pluginData[bn] = out.sourceMap;
       if (Array.isArray(out.images)) {
         for (const im of out.images) {
@@ -3121,25 +3126,11 @@ const App = {
     if (App.main) requestAnimationFrame(() => { App.main.invalidate(); App.main.render(); });
   },
 
-  syncImportAccept(plugins) {
-    const exts = new Set(['.json', '.epub']);
-    for (const p of plugins || []) {
-      for (const e of (p.extensions || [])) {
-        const v = String(e).trim().toLowerCase();
-        if (v.startsWith('.')) exts.add(v);
-      }
-    }
-    const accept = Array.from(exts).join(',');
-    if (els.importFileInput) els.importFileInput.accept = accept;
-    if (els.importFolderInput) els.importFolderInput.accept = accept;
-  },
-
   async renderPluginList() {
     const container = els.pluginList;
     if (!container) return;
     try {
       const plugins = await PluginManager.list();
-      App.syncImportAccept(plugins);
       if (!plugins.length) {
         container.innerHTML = `
           <div class="plugin-empty">
@@ -3176,25 +3167,23 @@ const App = {
         badges.push(`<span class="plugin-badge plugin-badge-match" title="${escapeHtml(stratTitle)}">${escapeHtml(stratLabel)}</span>`);
         const hasSettings = Array.isArray(p.settings) && p.settings.length > 0;
         row.innerHTML = `
-          <div class="plugin-head">
-            <div class="plugin-head-main">
+          <div class="plugin-info">
+            <div class="plugin-head">
               <span class="plugin-name">${escapeHtml(p.name)}</span>
               <span class="plugin-version">v${escapeHtml(p.version)}</span>
+              ${badges.length ? `<span class="plugin-badges">${badges.join('')}</span>` : ''}
             </div>
-            ${exts ? `<span class="plugin-exts" title="${escapeHtml(stratTitle)}">${exts}</span>` : ''}
+            <div class="plugin-meta">
+              ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
+              <span class="plugin-exts" title="${escapeHtml(stratTitle)}">${escapeHtml(stratLabel)}${exts ? ' · ' + exts : ''}</span>
+              ${Array.isArray(p.assets) && p.assets.length ? `<span class="plugin-exts" title="${escapeHtml(p.assets.join('\n'))}">${p.assets.length} asset</span>` : ''}
+            </div>
           </div>
-          ${badges.length ? `<div class="plugin-badges">${badges.join('')}</div>` : ''}
-          ${(p.author || (Array.isArray(p.assets) && p.assets.length)) ? `
-          <div class="plugin-meta">
-            ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
-            ${Array.isArray(p.assets) && p.assets.length ? `<span class="plugin-assets" title="${escapeHtml(p.assets.join('\n'))}">${p.assets.length} asset</span>` : ''}
-          </div>` : ''}
-          ${p.description ? `<div class="plugin-desc">${escapeHtml(p.description)}</div>` : ''}
           <div class="plugin-actions">
-            <button class="btn btn-ghost btn-xs btn-plugin-settings" title="Atur plugin ini"${hasSettings ? '' : ' disabled'}>
+            ${hasSettings ? `<button class="btn btn-ghost btn-xs btn-plugin-settings" title="Atur plugin ini">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
               Atur
-            </button>
+            </button>` : ''}
             <button class="btn btn-ghost btn-xs btn-uninstall-plugin" title="Hapus plugin dan project terkait">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.4 14.1A2 2 0 0 1 15.6 22H8.4a2 2 0 0 1-2-1.9L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
               Hapus
@@ -3263,7 +3252,7 @@ const App = {
     }
 
     const overlay = document.createElement('div');
-    overlay.className = 'backdrop backdrop-top';
+    overlay.className = 'backdrop';
     overlay.innerHTML = `
       <div class="modal modal-wide" role="dialog" aria-modal="true">
         <div class="modal-head"><h3>Pengaturan Plugin: ${escapeHtml(pluginMeta.name)}</h3></div>
