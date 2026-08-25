@@ -71,6 +71,7 @@ const DROPDOWNS = [
 const $ = id => document.getElementById(id);
 const escapeHtml = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const baseName = p => String(p || '').replace(/\\/g, '/').split('/').pop();
+const topFileCount = files => (Array.isArray(files) ? files : []).filter(f => !String(f).includes('/')).length;
 const isTrans = l => !!l.is_translated;
 const makeProjId = () => 'proj_' + Date.now() + '.cstl';
 const makeEpubId = () => 'epub_' + Date.now() + '.epub';
@@ -227,7 +228,7 @@ const Storage = {
       projectType: data.projectType || 'uninitialized',
       pluginId: data.pluginId || null,
       updatedAt: data.updatedAt,
-      fileCount: counts?.fileCount ?? data.imported_files?.length ?? 0,
+      fileCount: counts?.fileCount ?? topFileCount(data.imported_files),
       lineCount: counts?.lineCount ?? data.lines?.length ?? 0,
       translatedCount: tc
     });
@@ -262,7 +263,7 @@ const Storage = {
           projectType: data.projectType || 'uninitialized',
           pluginId: data.pluginId || null,
           updatedAt: data.updatedAt || f.lastModified,
-          fileCount: data.imported_files?.length || 0,
+          fileCount: topFileCount(data.imported_files),
           lineCount: data.lines?.length || 0,
           translatedCount: data.lines?.reduce((n, l) => n + (l.is_translated ? 1 : 0), 0) || 0
         });
@@ -1803,7 +1804,7 @@ State.queueSave = () => {
     idle(async () => {
       try {
         await Storage.saveProject(State.projectId, State.toData(), {
-          fileCount: State.files.length,
+          fileCount: topFileCount(State.files),
           lineCount: State.lines.length,
           translatedCount: State.translatedCount
         });
@@ -2134,7 +2135,12 @@ const Importer = {
       if (!out || !Array.isArray(out.lines)) throw new Error(`Plugin "${pluginMeta.name}" tidak mengembalikan lines array.`);
       const lines = PluginManager.normalizePluginLines(out.lines, cur);
       for (const l of lines) l.file = l.file || bn;
-      if (lines.length) { existing.add(bn); imported.push(...lines); cur += lines.length; }
+      if (lines.length) {
+        existing.add(bn);
+        for (const l of lines) existing.add(l.file);
+        imported.push(...lines);
+        cur += lines.length;
+      }
       if (out.sourceMap) pluginData[bn] = out.sourceMap;
       if (Array.isArray(out.images)) {
         for (const im of out.images) {
