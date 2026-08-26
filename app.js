@@ -253,33 +253,45 @@ const Storage = {
     await Storage.removeIndex(id);
   },
   async list() {
-    let items = await Storage.readIndex();
-    if (!items) items = await Storage.rebuildIndex();
-    return items.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+    return Storage.reconcileIndex(await Storage.readIndex());
   },
-  async rebuildIndex() {
+  indexEntry(id, data, fallbackModified) {
+    return {
+      id,
+      name: data.projectName || id.replace('.cstl', ''),
+      projectType: data.projectType || 'uninitialized',
+      pluginId: data.pluginId || null,
+      pluginName: data.pluginName || null,
+      updatedAt: data.updatedAt || fallbackModified,
+      fileCount: topFileCount(data.imported_files),
+      lineCount: data.lines?.length || 0,
+      translatedCount: data.lines?.reduce((n, l) => n + (l.is_translated ? 1 : 0), 0) || 0
+    };
+  },
+  async reconcileIndex(items) {
+    const saved = Array.isArray(items) ? items : [];
     const root = await Storage.root();
-    const items = [];
+    const byId = new Map(saved.map(p => [p.id, p]));
+    const found = [];
+    let changed = false;
     for await (const [name, h] of root.entries()) {
-      if (!name.endsWith('.cstl') || h.kind !== 'file') continue;
+      if (h.kind !== 'file' || !name.endsWith('.cstl')) continue;
+      const meta = byId.get(name);
+      if (meta) {
+        byId.delete(name);
+        found.push(meta);
+        continue;
+      }
       try {
         const f = await h.getFile();
-        const data = JSON.parse(await f.text());
-        items.push({
-          id: name,
-          name: data.projectName || name.replace('.cstl', ''),
-          projectType: data.projectType || 'uninitialized',
-          pluginId: data.pluginId || null,
-          pluginName: data.pluginName || null,
-          updatedAt: data.updatedAt || f.lastModified,
-          fileCount: topFileCount(data.imported_files),
-          lineCount: data.lines?.length || 0,
-          translatedCount: data.lines?.reduce((n, l) => n + (l.is_translated ? 1 : 0), 0) || 0
-        });
+        found.push(Storage.indexEntry(name, JSON.parse(await f.text()), f.lastModified));
+        changed = true;
       } catch {}
     }
-    await Storage.writeIndex(items);
-    return items;
+    if (byId.size) changed = true;
+    found.sort((a, b) => b.updatedAt - a.updatedAt);
+    if (changed) await Storage.writeIndex(found);
+    return found;
   },
   async loadEpubBuffer(epubId) {
     const root = await Storage.root();
@@ -291,11 +303,16 @@ const Storage = {
     await Storage.atomicWrite(root, epubId, buffer);
   },
   async readPluginIndex() {
+    let text;
     try {
       const root = await Storage.root();
       const f = await (await root.getFileHandle(PLUGINS_FILE)).getFile();
-      return JSON.parse(await f.text());
+      text = await f.text();
     } catch { return []; }
+    try {
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch { return null; }
   },
   async writePluginIndex(items) {
     const root = await Storage.root();
@@ -551,13 +568,15 @@ const OpfsExplorer = {
     const warnings = {
       project: 'Ini adalah file project (.cstl). Project akan hilang dari dashboard setelah dihapus.',
       epub: 'Ini adalah file EPUB yang dipakai project. Project terkait mungkin tidak bisa menampilkan gambar lagi.',
-      plugin: 'Ini adalah file plugin. Plugin terkait akan berhenti berfungsi.',
+      plugin: 'Ini adalah file paket plugin. Plugin akan dihapus dari daftar plugin.',
       index: 'Ini adalah file index internal. Aplikasi akan membangun ulang index otomatis saat dibuka.',
       tmp: 'Ini adalah file sementara dari operasi tulis yang gagal. Aman untuk dihapus.',
       folder: 'Folder ini dan seluruh isinya akan dihapus.',
       other: 'File ini tidak dikenali. Hapus jika Anda yakin.'
     };
-    const warning = warnings[kind] || warnings.other;
+    const warning = name === PLUGINS_FILE
+      ? 'Ini adalah daftar plugin terpasang. Semua plugin akan dihapus dari aplikasi saat dibuka kembali.'
+      : warnings[kind] || warnings.other;
     if (!confirm(`Hapus "${name}" dari OPFS?\n\n${warning}\n\nTindakan ini tidak dapat dibatalkan.`)) return;
     try {
       const dir = await this.dirHandle(this.path);
@@ -567,6 +586,8 @@ const OpfsExplorer = {
       if (els.opfsList && !els.opfsList.children.length) {
         this._showEmpty(true);
       }
+      if (kind === 'plugin' && name !== PLUGINS_FILE) await PluginRuntime.sync();
+      if (kind === 'plugin' || kind === 'project' || kind === 'index') App.loadDashboard();
     } catch (e) {
       alert('Gagal menghapus "' + name + '": ' + (e?.message || e));
     }
@@ -596,15 +617,16 @@ const PluginRuntime = {
   _workerUrl: null,
 
   async init() {
-    let index = await Storage.readPluginIndex();
-    const legacy = index.filter(p => !Array.isArray(p.files));
-    if (legacy.length) {
-      for (const p of legacy) { try { await Storage.removePluginFile(p.id); } catch {} }
-      index = index.filter(p => Array.isArray(p.files));
-      console.error(`[plugins] ${legacy.length} plugin format lama (single .js) dihapus — pasang ulang sebagai paket .zip.`);
+    const raw = await Storage.readPluginIndex();
+    const legacy = (raw || []).filter(p => !Array.isArray(p.files));
+    if (legacy.length) console.error(`[plugins] ${legacy.length} plugin format lama (single .js) dihapus — pasang ulang sebagai paket .zip.`);
+    PluginRuntime._index = (raw || []).filter(p => Array.isArray(p.files));
+    if (raw !== null) {
+      await PluginRuntime._sweepOrphanPacks();
+      if (legacy.length) await PluginRuntime._persist();
     }
-    PluginRuntime._index = index;
-    let dirty = legacy.length > 0;
+    await PluginRuntime.sync();
+    let dirty = false;
     for (const meta of PluginRuntime._index) {
       if (meta.enabled !== true) continue;
       try { await PluginRuntime._activate(meta); }
@@ -617,6 +639,39 @@ const PluginRuntime = {
     if (dirty) await PluginRuntime._persist();
     PluginRuntime.applyTheme();
     Shortcuts.refreshPluginActions();
+  },
+
+  async sync() {
+    const root = await Storage.root().catch(() => null);
+    if (!root) return false;
+    const alive = [];
+    let changed = false;
+    for (const meta of PluginRuntime._index) {
+      try {
+        await root.getFileHandle(PLUGIN_PREFIX + meta.id + '.zip');
+        alive.push(meta);
+      } catch {
+        PluginRuntime._deactivate(meta.id);
+        changed = true;
+      }
+    }
+    if (!changed) return false;
+    PluginRuntime._index = alive;
+    await PluginRuntime._persist();
+    PluginRuntime.applyTheme();
+    Shortcuts.refreshPluginActions();
+    return true;
+  },
+
+  async _sweepOrphanPacks() {
+    const root = await Storage.root().catch(() => null);
+    if (!root) return;
+    const installed = new Set(PluginRuntime._index.map(p => PLUGIN_PREFIX + p.id + '.zip'));
+    for await (const [name, h] of root.entries()) {
+      if (h.kind !== 'file' || !name.startsWith(PLUGIN_PREFIX)) continue;
+      if (installed.has(name)) continue;
+      try { await root.removeEntry(name); } catch {}
+    }
   },
 
   listMeta() { return PluginRuntime._index.slice(); },
@@ -2048,7 +2103,7 @@ function cacheEls() {
     'btnCopyNamesPlain', 'btnCopyNamesWithGlossary', 'btnCopyNamesMissingGlossary',
     'settingsModal', 'btnSettingsDasarReset', 'settingsIgnoreNameCheck', 'settingsPromptCheck',
     'settingsJumpToContextCheck', 'settingsHideToolsCheck',
-    'btnSettingsIncrementReset', 'settingsIncrementCheck', 'settingsIncrementStepInput',
+    'btnSettingsIncrementReset', 'settingsIncrementCheck', 'incrementStepWrap', 'settingsIncrementStepInput',
     'btnSettingsPromptReset', 'settingsPromptInput', 'btnSettingsEpubReset', 'settingsEpubTagsInput',
     'btnSettingsCancel', 'btnSettingsSave',
     'glossaryModal', 'btnGlossaryVndbReset', 'glossaryVndbCheck', 'glossaryVndbWrap',
@@ -2907,7 +2962,10 @@ const App = {
       toggleModal(els.pluginManagerModal, false);
       App.loadDashboard();
     });
-    els.btnPluginRefresh?.addEventListener('click', () => App.renderPluginList());
+    els.btnPluginRefresh?.addEventListener('click', async () => {
+      await PluginRuntime.sync();
+      App.renderPluginList();
+    });
 
     els.btnOpenPlugins?.addEventListener('click', () => {
       PluginRuntime.renderMenu();
@@ -3225,6 +3283,10 @@ const App = {
     els.btnSettingsIncrementReset?.addEventListener('click', () => {
       els.settingsIncrementCheck.checked = false;
       els.settingsIncrementStepInput.value = 100;
+      els.incrementStepWrap.classList.add('section-disabled');
+    });
+    els.settingsIncrementCheck.addEventListener('change', e => {
+      els.incrementStepWrap.classList.toggle('section-disabled', !e.target.checked);
     });
     els.btnSettingsCancel.addEventListener('click', () => toggleModal(els.settingsModal, false));
     els.btnSettingsSave.addEventListener('click', () => {
@@ -3504,6 +3566,7 @@ const App = {
       const v = State[key] ?? def;
       if (type === 'check') els[id].checked = v; else els[id].value = v;
     });
+    els.incrementStepWrap.classList.toggle('section-disabled', !State.incrementEnabled);
   },
 
   resetSettingsModal(group) {
@@ -3682,7 +3745,8 @@ const App = {
     return row;
   },
 
-  openPluginManager() {
+  async openPluginManager() {
+    await PluginRuntime.sync();
     toggleModal(els.pluginManagerModal, true);
     App.renderPluginList();
   },

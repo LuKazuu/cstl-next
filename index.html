@@ -296,9 +296,11 @@
           </div>
           <p class="hint m-0 mt-1 mb-2">Setelah terjemahan berhasil diterapkan, rentang baris "Dari - Sampai" otomatis maju dan rentang berikutnya langsung dipilih.</p>
           <label class="check-line mb-2"><input id="settingsIncrementCheck" type="checkbox" />Aktifkan Auto-Increment</label>
-          <div class="row gap-2 row-center-y wrap">
-            <span class="text-muted">Jumlah baris per rentang</span>
-            <input id="settingsIncrementStepInput" type="number" class="input" style="width:110px;" min="1" step="1" value="100" />
+          <div id="incrementStepWrap" class="nested-box">
+            <div class="row gap-2 row-center-y wrap">
+              <span class="text-muted">Jumlah baris per rentang</span>
+              <input id="settingsIncrementStepInput" type="number" class="input" style="width:110px;" min="1" step="1" value="100" />
+            </div>
           </div>
         </div>
       </div>
@@ -477,7 +479,7 @@
           <div class="row between mb-1">
             <div class="section-label-lg" style="margin:0;">Plugin</div>
           </div>
-          <p class="hint m-0 mt-1 mb-2">Kelola plugin: tema, otomasi alur kerja, hingga format file khusus.</p>
+          <p class="hint m-0 mt-1 mb-2">Kelola Plugin.</p>
           <button id="btnPluginManagerOpen" class="btn w-full">
             <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;"><path d="M5 5h4.5a2.5 2.5 0 1 1 5 0H19v4.5a2.5 2.5 0 1 1 0 5V19h-4.5a2.5 2.5 0 1 0-5 0H5v-4.5a2.5 2.5 0 1 0 0-5z"/></svg>
             Buka Plugin Manager
@@ -553,7 +555,7 @@
         </div>
       </div>
       <div class="modal-body">
-        <p class="hint m-0 mt-1 mb-2">Import Plugin dengan format ZIP.</p>
+        <p class="hint m-0 mt-1 mb-2">Import Plugin dengan format ZIP, pastikan Plugin tersebut terpercaya dan aman.</p>
         <button id="btnInstallPlugin" class="btn btn-primary w-full mb-2">
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Import Plugin
