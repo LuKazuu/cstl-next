@@ -147,18 +147,18 @@
             <button id="btnProofread" class="btn" disabled title="Cari &amp; Replace" aria-label="Cari &amp; Replace">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             </button>
-          </div>
-          <span class="toolbar-sep"></span>
-          <div class="toolbar-group">
             <button id="btnGlossary" class="btn" title="Glossary" aria-label="Glossary">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
             </button>
             <button id="btnContext" class="btn" title="Context" aria-label="Context">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             </button>
-            <button id="btnProjectPlugins" class="btn" title="Plugin" aria-label="Plugin">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h4.5a2.5 2.5 0 1 1 5 0H19v4.5a2.5 2.5 0 1 1 0 5V19h-4.5a2.5 2.5 0 1 0-5 0H5v-4.5a2.5 2.5 0 1 0 0-5z"/></svg>
-            </button>
+            <div class="dropdown" id="pluginMenuGroup">
+              <button id="btnOpenPlugins" class="btn" title="Plugin Project" aria-label="Plugin Project" aria-haspopup="menu">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h4.5a2.5 2.5 0 1 1 5 0H19v4.5a2.5 2.5 0 1 1 0 5V19h-4.5a2.5 2.5 0 1 0-5 0H5v-4.5a2.5 2.5 0 1 0 0-5z"/></svg>
+              </button>
+              <div id="pluginMenu" class="dropdown-content dropdown-right plugin-menu"></div>
+            </div>
             <button id="btnSettings" class="btn" title="Pengaturan" aria-label="Pengaturan">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             </button>
@@ -288,6 +288,18 @@
           </div>
           <p class="hint m-0 mt-1 mb-2">Digunakan untuk mengekstrak teks dari EPUB (pisahkan dengan koma).</p>
           <input id="settingsEpubTagsInput" class="input w-full" type="text" placeholder="p, h1, h2, h3" />
+        </div>
+        <div class="card mb-2 mt-3">
+          <div class="row between mb-1">
+            <div class="section-label-lg" style="margin:0;">Auto-Increment Baris</div>
+            <button id="btnSettingsIncrementReset" class="btn btn-ghost btn-xs">Reset Default</button>
+          </div>
+          <p class="hint m-0 mt-1 mb-2">Setelah terjemahan berhasil diterapkan, rentang baris "Dari - Sampai" otomatis maju dan rentang berikutnya langsung dipilih.</p>
+          <label class="check-line mb-2"><input id="settingsIncrementCheck" type="checkbox" />Aktifkan Auto-Increment</label>
+          <div class="row gap-2 row-center-y wrap">
+            <span class="text-muted">Jumlah baris per rentang</span>
+            <input id="settingsIncrementStepInput" type="number" class="input" style="width:110px;" min="1" step="1" value="100" />
+          </div>
         </div>
       </div>
       <div class="modal-actions mt-3">
@@ -465,10 +477,20 @@
           <div class="row between mb-1">
             <div class="section-label-lg" style="margin:0;">Plugin</div>
           </div>
-          <p class="hint m-0 mt-1 mb-2">Kelola plugin untuk format VN lain.</p>
+          <p class="hint m-0 mt-1 mb-2">Kelola plugin: tema, otomasi alur kerja, hingga format file khusus.</p>
           <button id="btnPluginManagerOpen" class="btn w-full">
             <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;"><path d="M5 5h4.5a2.5 2.5 0 1 1 5 0H19v4.5a2.5 2.5 0 1 1 0 5V19h-4.5a2.5 2.5 0 1 0-5 0H5v-4.5a2.5 2.5 0 1 0 0-5z"/></svg>
             Buka Plugin Manager
+          </button>
+        </div>
+        <div class="card mb-2 mt-3">
+          <div class="row between mb-1">
+            <div class="section-label-lg" style="margin:0;">Shortcut Keyboard</div>
+          </div>
+          <p class="hint m-0 mt-1 mb-2">Lihat dan ubah kombinasi tombol untuk aksi cepat di seluruh aplikasi.</p>
+          <button id="btnShortcutsOpen" class="btn w-full">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01"/><path d="M10 8h.01"/><path d="M14 8h.01"/><path d="M18 8h.01"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/><path d="M7 16h10"/></svg>
+            Buka Shortcut Keyboard
           </button>
         </div>
         <div class="card mb-2 mt-3">
@@ -531,7 +553,7 @@
         </div>
       </div>
       <div class="modal-body">
-        <p class="hint m-0 mt-1 mb-2">Import plugin .zip (berisi plugin.js + asset). Plugin yang dihapus juga menghapus project terkait.</p>
+        <p class="hint m-0 mt-1 mb-2">Import Plugin dengan format ZIP.</p>
         <button id="btnInstallPlugin" class="btn btn-primary w-full mb-2">
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Import Plugin
@@ -545,16 +567,25 @@
     </div>
   </div>
 
-  <div id="projectPluginModal" class="backdrop">
+  <div id="shortcutModal" class="backdrop">
     <div class="modal modal-wide" role="dialog" aria-modal="true">
-      <div class="modal-head"><h3>Plugin</h3></div>
+      <div class="modal-head">
+        <div class="between">
+          <h3>Shortcut Keyboard</h3>
+          <button id="btnShortcutsResetAll" class="btn btn-ghost btn-xs" title="Reset semua shortcut ke default">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/></svg>
+            Reset Semua
+          </button>
+        </div>
+      </div>
       <div class="modal-body">
-        <p class="hint m-0 mt-1 mb-2">Pengaturan plugin di sini hanya berlaku untuk project aktif. Pasang atau hapus plugin dari Plugin Manager di halaman utama.</p>
-        <div id="projectPluginList" class="plugin-list"></div>
+        <p class="hint m-0 mt-1 mb-2">Klik tombol kombinasi lalu tekan tombol keyboard untuk mengubah. Backspace menghapus pengikatan, Escape membatalkan.</p>
+        <p id="shortcutStatus" class="hint shortcut-status m-0 mb-2" hidden></p>
+        <div id="shortcutList" class="shortcut-list"></div>
       </div>
       <div class="modal-actions">
         <span class="grow"></span>
-        <button id="btnProjectPluginClose" class="btn btn-ghost">Tutup</button>
+        <button id="btnShortcutsClose" class="btn btn-ghost">Tutup</button>
       </div>
     </div>
   </div>

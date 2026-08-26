@@ -6,6 +6,7 @@ const INDEX_FILE = '_index.json';
 const PLUGINS_FILE = '_plugins.json';
 const PLUGIN_PREFIX = 'plugin_';
 const PLUGIN_API_VERSION = 1;
+const SHORTCUT_STORAGE_KEY = 'cstl.shortcuts.v1';
 const DEFAULT_PROMPT = `Translate entire text to Native English. Euphemism prohibited. Onomatopoeia must be English-based. Result must be inside codeblock. Keep line numbering and format (like code in the middle of the text) intact.`;
 const DEFAULT_RINGKASAN_PROMPT = `Outside the <translate> and </translate> tags (placed above or below the translated lines), include updated summary of the characters and overall story so far. Any characters and story need to be preserved even though they don't appear again for context.`;
 const FIXED_FORMAT_PROMPT = `Format:\n<translate>\ntext\n</translate>`;
@@ -17,12 +18,14 @@ const SCROLLER_OVERSCAN = 6;
 const DECODERS = ['utf-8', 'shift_jis', 'windows-31j', 'cp932'];
 
 const SETTINGS_FIELDS = [
-  { id: 'settingsIgnoreNameCheck',    key: 'ignoreName',    type: 'check', def: false },
-  { id: 'settingsPromptCheck',        key: 'promptEnabled', type: 'check', def: true  },
-  { id: 'settingsJumpToContextCheck', key: 'jumpToContext', type: 'check', def: false },
-  { id: 'settingsHideToolsCheck',     key: 'hideTools',     type: 'check', def: false },
-  { id: 'settingsPromptInput',        key: 'prompt',        type: 'value', def: DEFAULT_PROMPT },
-  { id: 'settingsEpubTagsInput',      key: 'epubTags',      type: 'value', def: 'p' }
+  { id: 'settingsIgnoreNameCheck',    key: 'ignoreName',       type: 'check',  def: false },
+  { id: 'settingsPromptCheck',        key: 'promptEnabled',    type: 'check',  def: true  },
+  { id: 'settingsJumpToContextCheck', key: 'jumpToContext',    type: 'check',  def: false },
+  { id: 'settingsHideToolsCheck',     key: 'hideTools',        type: 'check',  def: false },
+  { id: 'settingsIncrementCheck',     key: 'incrementEnabled', type: 'check',  def: false },
+  { id: 'settingsIncrementStepInput', key: 'incrementStep',    type: 'number', def: 100 },
+  { id: 'settingsPromptInput',        key: 'prompt',           type: 'value', def: DEFAULT_PROMPT },
+  { id: 'settingsEpubTagsInput',      key: 'epubTags',         type: 'value', def: 'p' }
 ];
 
 const PROOFREAD_FIELDS = [
@@ -37,8 +40,8 @@ const STATE_SCHEMA = [
   { key: 'projectName',        def: '' },
   { key: 'projectType',        def: 'uninitialized',        coerce: true },
   { key: 'pluginId',           def: null,                   coerce: true },
+  { key: 'pluginName',         def: null,                   coerce: true },
   { key: 'pluginData',         def: null,                   coerce: true },
-  { key: 'pluginSettings',     def: null,                   coerce: true },
   { key: 'epubTags',           def: 'p',                    coerce: true },
   { key: 'epubSourceId',       def: null,                   coerce: true },
   { key: 'prompt',             def: DEFAULT_PROMPT,         coerce: true, store: 'prompt_header' },
@@ -54,6 +57,9 @@ const STATE_SCHEMA = [
   { key: 'customRaw',          def: '' },
   { key: 'jumpToContext',      def: false },
   { key: 'hideTools',          def: false },
+  { key: 'incrementEnabled',   def: false },
+  { key: 'incrementStep',      def: 100,                    coerce: true },
+  { key: 'pluginSettings',    def: {},                     coerce: true },
   { key: 'prScope',            def: 'all',                  coerce: true, store: 'proofreadScope' },
   { key: 'prRegex',            def: false,                  store: 'proofreadRegex' },
   { key: 'prCase',             def: false,                  store: 'proofreadCaseSensitive' },
@@ -65,7 +71,8 @@ const STATE_SCHEMA = [
 
 const DROPDOWNS = [
   { trigger: 'btnImportMain',   panel: 'importDropdown',    group: 'importGroup'    },
-  { trigger: 'btnCopyAllNames', panel: 'copyNamesDropdown', group: 'copyNamesGroup' }
+  { trigger: 'btnCopyAllNames', panel: 'copyNamesDropdown', group: 'copyNamesGroup' },
+  { trigger: 'btnOpenPlugins',  panel: 'pluginMenu',        group: 'pluginMenuGroup' }
 ];
 
 const $ = id => document.getElementById(id);
@@ -227,6 +234,7 @@ const Storage = {
       name: data.projectName,
       projectType: data.projectType || 'uninitialized',
       pluginId: data.pluginId || null,
+      pluginName: data.pluginName || null,
       updatedAt: data.updatedAt,
       fileCount: counts?.fileCount ?? topFileCount(data.imported_files),
       lineCount: counts?.lineCount ?? data.lines?.length ?? 0,
@@ -262,6 +270,7 @@ const Storage = {
           name: data.projectName || name.replace('.cstl', ''),
           projectType: data.projectType || 'uninitialized',
           pluginId: data.pluginId || null,
+          pluginName: data.pluginName || null,
           updatedAt: data.updatedAt || f.lastModified,
           fileCount: topFileCount(data.imported_files),
           lineCount: data.lines?.length || 0,
@@ -292,50 +301,21 @@ const Storage = {
     const root = await Storage.root();
     await Storage.atomicWrite(root, PLUGINS_FILE, JSON.stringify(items));
   },
-  async upsertPluginIndex(meta) {
-    const items = await Storage.readPluginIndex();
-    const i = items.findIndex(p => p.id === meta.id);
-    if (i >= 0) items[i] = meta; else items.push(meta);
-    await Storage.writePluginIndex(items);
-  },
-  async removePluginIndex(id) {
-    const items = await Storage.readPluginIndex();
-    await Storage.writePluginIndex(items.filter(p => p.id !== id));
-  },
-  async savePlugin(id, content) {
+  async savePluginZip(id, buffer) {
     const root = await Storage.root();
-    await Storage.atomicWrite(root, PLUGIN_PREFIX + id + '.js', content);
+    await Storage.removePluginFile(id);
+    await Storage.atomicWrite(root, PLUGIN_PREFIX + id + '.zip', buffer);
   },
-  async savePluginAssets(id, files) {
+  async loadPluginZip(id) {
     const root = await Storage.root();
-    const dirName = PLUGIN_PREFIX + id + '_assets';
-    try { await root.removeEntry(dirName, { recursive: true }); } catch {}
-    const dir = await root.getDirectoryHandle(dirName, { create: true });
-    for (const f of files) {
-      const parts = f.name.split('/');
-      let d = dir;
-      for (let i = 0; i < parts.length - 1; i++) d = await d.getDirectoryHandle(parts[i], { create: true });
-      const fh = await d.getFileHandle(parts[parts.length - 1], { create: true });
-      const w = await fh.createWritable();
-      await w.write(f.bytes);
-      await w.close();
-    }
-  },
-  async removePluginAssets(id) {
-    const root = await Storage.root();
-    try { await root.removeEntry(PLUGIN_PREFIX + id + '_assets', { recursive: true }); } catch {}
-  },
-  async loadPluginContent(id) {
-    const root = await Storage.root();
-    const f = await (await root.getFileHandle(PLUGIN_PREFIX + id + '.js')).getFile();
-    return await f.text();
+    const f = await (await root.getFileHandle(PLUGIN_PREFIX + id + '.zip')).getFile();
+    return await f.arrayBuffer();
   },
   async removePluginFile(id) {
     const root = await Storage.root();
-    try { await root.removeEntry(PLUGIN_PREFIX + id + '.js'); } catch {}
-  },
-  async listPlugins() {
-    return await Storage.readPluginIndex();
+    for (const ext of ['.js', '.zip']) {
+      try { await root.removeEntry(PLUGIN_PREFIX + id + ext); } catch {}
+    }
   },
   async wipe() {
     const root = await navigator.storage.getDirectory();
@@ -348,13 +328,10 @@ const Storage = {
 const OpfsExplorer = {
   path: [],
   classify(name, isDir) {
-    if (isDir) {
-      if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('_assets')) return 'plugin';
-      return 'folder';
-    }
+    if (isDir) return 'folder';
     if (name === INDEX_FILE) return 'index';
     if (name === PLUGINS_FILE) return 'plugin';
-    if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('.js')) return 'plugin';
+    if (name.startsWith(PLUGIN_PREFIX) && (name.endsWith('.js') || name.endsWith('.zip'))) return 'plugin';
     if (name.endsWith('.cstl')) return 'project';
     if (name.startsWith('.') && name.endsWith('.tmp')) return 'tmp';
     if (/^epub_/.test(name) || /\.(epub|epub3)$/i.test(name)) return 'epub';
@@ -574,9 +551,7 @@ const OpfsExplorer = {
     const warnings = {
       project: 'Ini adalah file project (.cstl). Project akan hilang dari dashboard setelah dihapus.',
       epub: 'Ini adalah file EPUB yang dipakai project. Project terkait mungkin tidak bisa menampilkan gambar lagi.',
-      plugin: isDir
-        ? 'Folder ini berisi aset plugin. Plugin terkait mungkin tidak berfungsi normal.'
-        : 'Ini adalah file plugin. Plugin terkait akan berhenti berfungsi.',
+      plugin: 'Ini adalah file plugin. Plugin terkait akan berhenti berfungsi.',
       index: 'Ini adalah file index internal. Aplikasi akan membangun ulang index otomatis saat dibuka.',
       tmp: 'Ini adalah file sementara dari operasi tulis yang gagal. Aman untuk dihapus.',
       folder: 'Folder ini dan seluruh isinya akan dihapus.',
@@ -614,329 +589,575 @@ const OpfsExplorer = {
   }
 };
 
-const PluginManager = {
-  _workerPool: new Map(),
-  _index: null,
-  _workerRpcId: 1,
-  _rpcPending: new Map(),
+const PluginRuntime = {
+  _index: [],
+  _instances: new Map(),
+  _styleEl: null,
+  _workerUrl: null,
+
+  async init() {
+    let index = await Storage.readPluginIndex();
+    const legacy = index.filter(p => !Array.isArray(p.files));
+    if (legacy.length) {
+      for (const p of legacy) { try { await Storage.removePluginFile(p.id); } catch {} }
+      index = index.filter(p => Array.isArray(p.files));
+      console.error(`[plugins] ${legacy.length} plugin format lama (single .js) dihapus — pasang ulang sebagai paket .zip.`);
+    }
+    PluginRuntime._index = index;
+    let dirty = legacy.length > 0;
+    for (const meta of PluginRuntime._index) {
+      if (meta.enabled !== true) continue;
+      try { await PluginRuntime._activate(meta); }
+      catch (e) {
+        console.error(`[plugin:${meta.id}] gagal diaktifkan:`, e);
+        meta.enabled = false;
+        dirty = true;
+      }
+    }
+    if (dirty) await PluginRuntime._persist();
+    PluginRuntime.applyTheme();
+    Shortcuts.refreshPluginActions();
+  },
+
+  listMeta() { return PluginRuntime._index.slice(); },
+
+  getMeta(id) { return PluginRuntime._index.find(p => p.id === id) || null; },
+
+  async _persist() { await Storage.writePluginIndex(PluginRuntime._index); },
 
   parseManifest(code) {
-    const m = code.match(/\/\*\s*@cstl-plugin\s*([\s\S]*?)@cstl-plugin\s*\*\//);
+    const m = String(code || '').match(/\/\*\s*@cstl\s*([\s\S]*?)\*\//);
     if (!m) return null;
-    try {
-      const meta = JSON.parse(m[1].trim());
-      return PluginManager.validateManifest(meta) ? meta : null;
-    } catch { return null; }
+    try { return JSON.parse(m[1].trim()); } catch { return null; }
   },
 
   validateManifest(m) {
     if (!m || typeof m !== 'object') return false;
     if (typeof m.id !== 'string' || !/^[a-z0-9][a-z0-9_-]*$/i.test(m.id)) return false;
     if (typeof m.name !== 'string' || !m.name.trim()) return false;
-    if (typeof m.version !== 'string') return false;
-    if (!m.matchStrategy) return false;
-    const strategies = Array.isArray(m.matchStrategy) ? m.matchStrategy : [m.matchStrategy];
-    if (!strategies.length) return false;
-    const known = ['extension', 'magic', 'filename', 'any'];
-    if (!strategies.every(s => known.includes(s))) return false;
-    if (strategies.includes('extension')) {
+    if (typeof m.version !== 'string' || !m.version.trim()) return false;
+    if (m.author != null && typeof m.author !== 'string') return false;
+    if (m.description != null && typeof m.description !== 'string') return false;
+    if (m.api != null && (typeof m.api !== 'number' || m.api > PLUGIN_API_VERSION)) return false;
+    if (m.extensions != null) {
       if (!Array.isArray(m.extensions) || !m.extensions.length) return false;
-      if (!m.extensions.every(e => typeof e === 'string' && e.startsWith('.'))) return false;
-    }
-    if (strategies.includes('magic')) {
-      if (!Array.isArray(m.magic) || !m.magic.length) return false;
-      for (const mg of m.magic) {
-        if (!mg || typeof mg !== 'object') return false;
-        if (typeof mg.offset !== 'number' || mg.offset < 0 || !Number.isFinite(mg.offset)) return false;
-        if (typeof mg.hex !== 'string' || !/^[0-9a-f]*$/i.test(mg.hex) || !mg.hex.length || mg.hex.length % 2 !== 0) return false;
-      }
-    }
-    if (strategies.includes('filename')) {
-      if (typeof m.filenameRegex !== 'string' || !m.filenameRegex.trim()) return false;
-      try { new RegExp(m.filenameRegex); } catch { return false; }
-    }
-    if (strategies.includes('any') && strategies.length > 1) return false;
-
-    if (m.settings != null) {
-      if (!Array.isArray(m.settings)) return false;
-      for (const s of m.settings) {
-        if (!s || typeof s !== 'object') return false;
-        if (typeof s.key !== 'string' || !/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(s.key)) return false;
-        if (typeof s.label !== 'string' || !s.label.trim()) return false;
-        const t = (s.type || 'string').toLowerCase();
-        if (!['string','number','boolean','select','color','textarea'].includes(t)) return false;
-      }
+      if (!m.extensions.every(e => typeof e === 'string' && e.trim().startsWith('.'))) return false;
     }
     return true;
   },
 
-  async list() {
-    if (PluginManager._index) return PluginManager._index;
-    PluginManager._index = await Storage.listPlugins();
-    return PluginManager._index;
-  },
-
-  async refreshIndex() {
-    PluginManager._index = await Storage.listPlugins();
-    return PluginManager._index;
-  },
-
-  hexToBytes(hex) {
-    const h = String(hex || '').toLowerCase().replace(/[^0-9a-f]/g, '');
-    const out = new Uint8Array(h.length / 2);
-    for (let i = 0; i < out.length; i++) {
-      out[i] = parseInt(h.substr(i * 2, 2), 16);
+  normalizeSettings(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const s of raw) {
+      if (!s || typeof s !== 'object') continue;
+      if (typeof s.key !== 'string' || !/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(s.key)) continue;
+      if (typeof s.label !== 'string' || !s.label.trim()) continue;
+      const type = ['string', 'number', 'boolean', 'select', 'textarea'].includes(s.type) ? s.type : 'string';
+      const def = type === 'number' ? (Number(s.default) || 0)
+        : type === 'boolean' ? !!s.default
+        : String(s.default ?? '');
+      const entry = { key: s.key, label: s.label, type, default: def };
+      if (type === 'select' && Array.isArray(s.options)) {
+        entry.options = s.options.map(o => (o && typeof o === 'object')
+          ? { value: String(o.value), label: String(o.label) }
+          : { value: String(o), label: String(o) });
+      }
+      if (typeof s.placeholder === 'string') entry.placeholder = s.placeholder;
+      if (typeof s.description === 'string') entry.description = s.description;
+      out.push(entry);
     }
     return out;
   },
 
-  matchMagic(buffer, magic) {
-    if (!buffer || !Array.isArray(magic) || !magic.length) return false;
-    for (const mg of magic) {
-      const pat = PluginManager.hexToBytes(mg.hex);
-      const off = mg.offset|0;
-      if (buffer.length < off + pat.length) continue;
-      let ok = true;
-      for (let i = 0; i < pat.length; i++) {
-        if (buffer[off + i] !== pat[i]) { ok = false; break; }
+  valuesFor(meta) {
+    const vals = (State.projectId && State.pluginSettings && State.pluginSettings[meta.id] && typeof State.pluginSettings[meta.id] === 'object') ? State.pluginSettings[meta.id] : {};
+    const out = {};
+    for (const s of (meta.settings || [])) out[s.key] = (s.key in vals) ? vals[s.key] : s.default;
+    return out;
+  },
+
+  setValues(id, values) {
+    if (!State.projectId) return;
+    const next = { ...State.pluginSettings };
+    if (values && typeof values === 'object' && Object.keys(values).length) next[id] = values;
+    else delete next[id];
+    State.pluginSettings = next;
+    State.queueSave();
+  },
+
+  _evalExports(code) {
+    const factory = new Function('module', 'exports', '"use strict";\n' + code + '\n;return module.exports;');
+    const m = { exports: {} };
+    const out = factory(m, m.exports);
+    if (!out || typeof out !== 'object') throw new Error('Plugin tidak mengekspor objek.');
+    return out;
+  },
+
+  toWasmSource(source) {
+    if (source instanceof Uint8Array) return source;
+    if (source instanceof ArrayBuffer) return new Uint8Array(source);
+    throw new Error('Sumber WASM harus Uint8Array atau ArrayBuffer (ambil dari api.asset()).');
+  },
+
+  toWasmInput(input) {
+    if (input == null) return new Uint8Array(0);
+    if (typeof input === 'string') return new TextEncoder().encode(input);
+    if (input instanceof Uint8Array) return input;
+    if (input instanceof ArrayBuffer) return new Uint8Array(input);
+    throw new Error('Input WASM harus string, Uint8Array, atau ArrayBuffer.');
+  },
+
+  wrapWasm(instance) {
+    const ex = instance.exports;
+    if (!ex || !(ex.memory instanceof WebAssembly.Memory)) throw new Error('Modul WASM harus mengekspor memory.');
+    const wrap = {
+      instance,
+      exports: ex,
+      memory: ex.memory,
+      writeBytes(data) {
+        const u8 = typeof data === 'string' ? new TextEncoder().encode(data) : PluginRuntime.toWasmInput(data);
+        if (typeof ex.alloc !== 'function') throw new Error('Modul WASM harus mengekspor alloc(size) untuk writeBytes.');
+        const ptr = ex.alloc(u8.length);
+        new Uint8Array(ex.memory.buffer).set(u8, ptr);
+        return { ptr, len: u8.length };
+      },
+      readBytes(ptr, len) {
+        return new Uint8Array(ex.memory.buffer).slice(ptr, ptr + len);
+      },
+      readString(ptr, len) {
+        return new TextDecoder().decode(wrap.readBytes(ptr, len));
+      },
+      free(ptr, len) {
+        if (typeof ex.free === 'function') ex.free(ptr, len);
       }
-      if (ok) return true;
+    };
+    return wrap;
+  },
+
+  workerUrl() {
+    if (!PluginRuntime._workerUrl) {
+      const src = '"use strict";self.onmessage=async(e)=>{const{src,fn,input}=e.data;try{const r=await WebAssembly.instantiate(src,{});const ex=r.instance.exports;if(typeof ex[fn]!=="function")throw new Error(\'Export "\'+fn+\'" tidak ditemukan.\');if(typeof ex.alloc!=="function")throw new Error(\'Modul WASM harus mengekspor alloc(size).\');const inPtr=ex.alloc(input.length);new Uint8Array(ex.memory.buffer).set(input,inPtr);const resPtr=ex[fn](inPtr,input.length);const dv=new DataView(ex.memory.buffer);const outLen=dv.getUint32(resPtr,true);const out=new Uint8Array(ex.memory.buffer).slice(resPtr+4,resPtr+4+outLen);if(typeof ex.free==="function"){try{ex.free(inPtr,input.length);ex.free(resPtr,outLen+4);}catch(err){}}self.postMessage({ok:true,output:out});}catch(err){self.postMessage({ok:false,error:String(err&&err.message||err)});}};';
+      PluginRuntime._workerUrl = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
     }
-    return false;
+    return PluginRuntime._workerUrl;
   },
 
-  matchFilename(fileName, regexStr) {
-    if (typeof regexStr !== 'string' || !regexStr) return false;
-    try { return new RegExp(regexStr, 'i').test(fileName); } catch { return false; }
+  runWasm(source, fn, input) {
+    return new Promise((resolve, reject) => {
+      let wasmBytes, inputBytes;
+      try {
+        wasmBytes = PluginRuntime.toWasmSource(source).slice();
+        inputBytes = PluginRuntime.toWasmInput(input).slice();
+      } catch (e) { reject(e); return; }
+      let worker = null;
+      try { worker = new Worker(PluginRuntime.workerUrl()); }
+      catch {
+        PluginRuntime.runWasmInline(wasmBytes, fn, inputBytes).then(resolve, reject);
+        return;
+      }
+      worker.onmessage = ev => {
+        const d = ev.data || {};
+        worker.terminate();
+        if (d.ok) resolve(d.output);
+        else reject(new Error(d.error || 'runWasm gagal.'));
+      };
+      worker.onerror = ev => {
+        worker.terminate();
+        reject(new Error(ev.message || 'runWasm gagal.'));
+      };
+      worker.postMessage({ src: wasmBytes, fn, input: inputBytes }, [wasmBytes.buffer, inputBytes.buffer]);
+    });
   },
 
-  async resolvePlugin(fileName, sampleBytes) {
-    const list = await PluginManager.list();
-    const name = String(fileName || '');
-    const dotIdx = name.lastIndexOf('.');
-    const ext = dotIdx >= 0 ? name.slice(dotIdx).toLowerCase() : '';
-    const buf = sampleBytes instanceof Uint8Array ? sampleBytes : (sampleBytes ? new Uint8Array(sampleBytes) : null);
-    for (const p of list) {
-      const strategies = Array.isArray(p.matchStrategy) ? p.matchStrategy : [p.matchStrategy];
-      for (const s of strategies) {
-        if (s === 'extension' && ext && (p.extensions || []).some(e => String(e).toLowerCase() === ext)) return p;
-        if (s === 'magic' && buf && PluginManager.matchMagic(buf, p.magic)) return p;
-        if (s === 'filename' && PluginManager.matchFilename(name, p.filenameRegex)) return p;
-        if (s === 'any') return p;
+  async runWasmInline(wasmBytes, fn, inputBytes) {
+    const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+    const ex = instance.exports;
+    if (typeof ex[fn] !== 'function') throw new Error(`Export "${fn}" tidak ditemukan.`);
+    if (typeof ex.alloc !== 'function') throw new Error('Modul WASM harus mengekspor alloc(size).');
+    const inPtr = ex.alloc(inputBytes.length);
+    new Uint8Array(ex.memory.buffer).set(inputBytes, inPtr);
+    const resPtr = ex[fn](inPtr, inputBytes.length);
+    const dv = new DataView(ex.memory.buffer);
+    const outLen = dv.getUint32(resPtr, true);
+    const out = new Uint8Array(ex.memory.buffer).slice(resPtr + 4, resPtr + 4 + outLen);
+    if (typeof ex.free === 'function') {
+      try { ex.free(inPtr, inputBytes.length); ex.free(resPtr, outLen + 4); } catch {}
+    }
+    return out;
+  },
+
+  pickFile(accept) {
+    return new Promise(resolve => {
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      if (accept) inp.accept = String(accept);
+      inp.style.display = 'none';
+      document.body.appendChild(inp);
+      let settled = false;
+      const finish = val => {
+        if (settled) return;
+        settled = true;
+        inp.remove();
+        resolve(val);
+      };
+      inp.addEventListener('change', async () => {
+        const f = inp.files && inp.files[0];
+        if (!f) return finish(null);
+        try { finish({ name: f.name, buffer: await f.arrayBuffer() }); }
+        catch { finish(null); }
+      });
+      inp.addEventListener('cancel', () => finish(null));
+      inp.click();
+    });
+  },
+
+  download(data, filename) {
+    let blob = data instanceof Blob ? data : null;
+    if (!blob) {
+      const body = (data instanceof Uint8Array || data instanceof ArrayBuffer) ? data : String(data ?? '');
+      blob = new Blob([body], { type: 'application/octet-stream' });
+    }
+    download(URL.createObjectURL(blob), String(filename || 'download'));
+  },
+
+  resolveAssetPath(path) {
+    const p = String(path ?? '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+    if (!p || p.split('/').some(seg => seg === '..' || seg === '')) {
+      throw new Error(`Path asset tidak valid: "${path}"`);
+    }
+    return p;
+  },
+
+  makeApi(meta, pkg) {
+    const readAsset = async (path, type) => {
+      const p = PluginRuntime.resolveAssetPath(path);
+      const f = pkg.file(p);
+      if (!f) throw new Error(`Asset "${p}" tidak ditemukan di paket.`);
+      return await f.async(type);
+    };
+    return {
+      version: PLUGIN_API_VERSION,
+      pluginId: meta.id,
+      get settings() { return PluginRuntime.valuesFor(PluginRuntime.getMeta(meta.id) || meta); },
+      toast: msg => App.flash(String(msg ?? '')),
+      copy: text => clipboard(String(text ?? '')),
+      copySelection: () => App.copyForAi(),
+      selectRange: (from, to) => { els.rangeFromInput.value = from; els.rangeToInput.value = to; App.selectRange(); },
+      clearSelection: () => { State.selected.clear(); App.syncCheckboxes(); },
+      getSelection: () => Array.from(State.selected),
+      getProject: () => State.projectId ? {
+        name: State.projectName,
+        type: State.projectType,
+        fileCount: State.files.length,
+        lineCount: State.lines.length,
+        translatedCount: State.translatedCount
+      } : null,
+      getLines: () => State.lines.map(l => ({
+        num: l.line_num,
+        name: l.name,
+        message: l.message,
+        translated: !!l.is_translated,
+        fileName: l.file
+      })),
+      on: (event, handler) => PluginRuntime.addListener(meta.id, event, handler),
+      listAssets: () => meta.files.slice(),
+      asset: path => readAsset(path, 'uint8array'),
+      assetText: path => readAsset(path, 'string'),
+      get JSZip() { return jsZipReady() ? JSZip : null; },
+      wasm: async (source, imports) => {
+        const bytes = PluginRuntime.toWasmSource(source);
+        const res = await WebAssembly.instantiate(bytes, imports || {});
+        return PluginRuntime.wrapWasm(res.instance);
+      },
+      runWasm: (source, fn, input) => PluginRuntime.runWasm(source, fn, input),
+      pickFile: accept => PluginRuntime.pickFile(accept),
+      download: (data, filename) => PluginRuntime.download(data, filename),
+      decode: decodeBuffer
+    };
+  },
+
+  addListener(pluginId, event, handler) {
+    const inst = PluginRuntime._instances.get(pluginId);
+    if (!inst || typeof handler !== 'function') return () => {};
+    if (!inst.listeners.has(event)) inst.listeners.set(event, new Set());
+    const set = inst.listeners.get(event);
+    set.add(handler);
+    return () => { try { set.delete(handler); } catch {} };
+  },
+
+  async _activate(meta) {
+    if (!jsZipReady()) throw new Error('JSZip belum termuat, tunggu sebentar lalu coba lagi.');
+    const zipBuffer = await Storage.loadPluginZip(meta.id);
+    const pkg = await JSZip.loadAsync(zipBuffer).catch(() => { throw new Error('File paket plugin rusak.'); });
+    const entry = pkg.file('plugin.js');
+    if (!entry) throw new Error('plugin.js tidak ditemukan di paket plugin.');
+    const code = await entry.async('string');
+    const exports = PluginRuntime._evalExports(code);
+    const api = PluginRuntime.makeApi(meta, pkg);
+    PluginRuntime._instances.set(meta.id, { exports, api, listeners: new Map(), meta, pkg });
+    if (typeof exports.activate === 'function') {
+      try { await exports.activate(api); }
+      catch (e) {
+        PluginRuntime._instances.delete(meta.id);
+        throw e;
       }
     }
-    return null;
   },
 
-  async getById(id) {
-    const list = await PluginManager.list();
-    return list.find(p => p.id === id) || null;
+  _deactivate(id) {
+    const inst = PluginRuntime._instances.get(id);
+    if (!inst) return;
+    PluginRuntime._instances.delete(id);
+    try { if (typeof inst.exports.deactivate === 'function') inst.exports.deactivate(); }
+    catch (e) { console.error(`[plugin:${id}] error saat deactivate:`, e); }
+  },
+
+  instance(id) { return PluginRuntime._instances.get(id) || null; },
+
+  async setEnabled(id, enabled) {
+    const meta = PluginRuntime.getMeta(id);
+    if (!meta) return;
+    if (enabled) {
+      try { await PluginRuntime._activate(meta); }
+      catch (e) {
+        App.flash(`Plugin "${meta.name}" gagal diaktifkan: ${e.message}`);
+        return;
+      }
+    } else {
+      PluginRuntime._deactivate(id);
+    }
+    meta.enabled = !!enabled;
+    await PluginRuntime._persist();
+    PluginRuntime.applyTheme();
+    Shortcuts.refreshPluginActions();
+  },
+
+  applyTheme() {
+    if (!PluginRuntime._styleEl) {
+      PluginRuntime._styleEl = document.createElement('style');
+      PluginRuntime._styleEl.id = 'pluginTheme';
+      document.head.appendChild(PluginRuntime._styleEl);
+    }
+    const parts = [];
+    for (const inst of PluginRuntime._instances.values()) {
+      const t = inst.exports.theme;
+      if (typeof t === 'string' && t.trim()) parts.push(t);
+    }
+    PluginRuntime._styleEl.textContent = parts.join('\n');
   },
 
   async install(file) {
-    if (!file.name.toLowerCase().endsWith('.zip')) {
-      throw new Error('Plugin harus berupa file .zip yang berisi plugin.js di root.');
-    }
-    if (!jsZipReady()) throw new Error('JSZip tidak tersedia.');
-    const zip = await JSZip.loadAsync(file);
+    const name = String(file.name || '');
+    if (!/\.zip$/i.test(name)) throw new Error('Plugin harus berupa paket .zip berisi plugin.js di root.');
+    if (!jsZipReady()) throw new Error('JSZip belum termuat, tunggu sebentar lalu coba lagi.');
+    const zipBuffer = await file.arrayBuffer();
+    const zip = await JSZip.loadAsync(zipBuffer).catch(() => { throw new Error('File .zip tidak valid atau rusak.'); });
     const entry = zip.file('plugin.js');
-    if (!entry) throw new Error('plugin.js tidak ditemukan di root ZIP.');
+    if (!entry) throw new Error('Paket harus berisi plugin.js di root.');
     const text = await entry.async('string');
-    const meta = PluginManager.parseManifest(text);
-    if (!meta) throw new Error('plugin.js bukan plugin CSTL yang valid. Header /* @cstl-plugin ... @cstl-plugin */ tidak ditemukan atau rusak.');
-    if (meta.api_version && meta.api_version > PLUGIN_API_VERSION) {
-      throw new Error(`Plugin memerlukan API v${meta.api_version}, host hanya mendukung v${PLUGIN_API_VERSION}.`);
+    const files = Object.keys(zip.files)
+      .filter(n => !zip.files[n].dir && n !== 'plugin.js')
+      .map(n => n.replace(/^\.\//, '').replace(/^\/+/, ''))
+      .filter(n => n && !n.split('/').some(seg => seg === '..' || seg === ''))
+      .sort();
+    const manifest = PluginRuntime.parseManifest(text);
+    if (!manifest || !PluginRuntime.validateManifest(manifest)) {
+      throw new Error('File tidak berisi manifest /* @cstl { ... } */ yang valid.');
     }
-    const existing = await PluginManager.getById(meta.id);
-    if (existing) {
-      if (!confirm(`Plugin "${meta.name}" (id: ${meta.id}) sudah terpasang (v${existing.version}). Timpa dengan v${meta.version}?`)) {
-        return null;
+    const exports = PluginRuntime._evalExports(text);
+    const settings = PluginRuntime.normalizeSettings(exports.settings);
+    const caps = [];
+    if (manifest.extensions?.length) caps.push('parser');
+    if (typeof exports.theme === 'string' && exports.theme.trim()) caps.push('theme');
+    if (typeof exports.onCopy === 'function' || typeof exports.onApply === 'function') caps.push('hooks');
+    if (exports.commands && typeof exports.commands === 'object') caps.push('commands');
+    if (settings.length) caps.push('settings');
+    const existing = PluginRuntime.getMeta(manifest.id);
+    if (existing && !confirm(`Plugin "${manifest.name}" sudah terpasang (v${existing.version}). Timpa dengan v${manifest.version}?`)) return null;
+    await Storage.savePluginZip(manifest.id, zipBuffer);
+    const meta = {
+      id: manifest.id,
+      name: manifest.name.trim(),
+      version: manifest.version.trim(),
+      author: (manifest.author || '').trim(),
+      description: (manifest.description || '').trim(),
+      extensions: Array.isArray(manifest.extensions) ? manifest.extensions.map(e => e.trim().toLowerCase()) : [],
+      settings,
+      files,
+      caps,
+      enabled: existing ? existing.enabled === true : true,
+      updatedAt: Date.now()
+    };
+    const i = PluginRuntime._index.findIndex(p => p.id === meta.id);
+    if (i >= 0) PluginRuntime._index[i] = meta; else PluginRuntime._index.push(meta);
+    PluginRuntime._deactivate(meta.id);
+    if (meta.enabled) {
+      try { await PluginRuntime._activate(meta); }
+      catch (e) {
+        meta.enabled = false;
+        App.flash(`Plugin "${meta.name}" gagal diaktifkan: ${e.message}`);
       }
     }
-    const assetFiles = [];
-    zip.forEach((path, zf) => {
-      if (zf.dir) return;
-      const clean = path.replace(/\\/g, '/').split('/').filter(p => p && p !== '.' && p !== '..').join('/');
-      if (!clean || clean === 'plugin.js' || clean.startsWith('__MACOSX/') || clean.endsWith('/.DS_Store') || clean === '.DS_Store') return;
-      assetFiles.push({ name: clean, zf });
-    });
-    const assets = [];
-    for (const a of assetFiles) {
-      assets.push({ name: a.name, bytes: new Uint8Array(await a.zf.async('arraybuffer')) });
-    }
-    await Storage.savePlugin(meta.id, text);
-    await Storage.savePluginAssets(meta.id, assets);
-    await Storage.upsertPluginIndex({
-      id: meta.id,
-      name: meta.name,
-      version: meta.version,
-      author: meta.author || '',
-      description: meta.description || '',
-      extensions: Array.isArray(meta.extensions) ? meta.extensions : [],
-      matchStrategy: Array.isArray(meta.matchStrategy) ? meta.matchStrategy : [meta.matchStrategy],
-      magic: Array.isArray(meta.magic) ? meta.magic.map(g => ({ offset: g.offset|0, hex: String(g.hex).toLowerCase() })) : null,
-      filenameRegex: typeof meta.filenameRegex === 'string' ? meta.filenameRegex : null,
-      apiVersion: meta.api_version || PLUGIN_API_VERSION,
-      fileName: PLUGIN_PREFIX + meta.id + '.js',
-      installedAt: existing?.installedAt || Date.now(),
-      updatedAt: Date.now(),
-      settings: Array.isArray(meta.settings) ? meta.settings : null,
-      wantsJsZip: !!meta.wants_js_zip || !!meta.wantsJsZip,
-      wasm: !!meta.wasm,
-      worker: typeof Worker !== 'undefined',
-      assets: assets.map(a => a.name)
-    });
-    await PluginManager.terminateWorker(meta.id);
-    await PluginManager.refreshIndex();
+    await PluginRuntime._persist();
+    PluginRuntime.applyTheme();
+    Shortcuts.refreshPluginActions();
     return meta;
   },
 
   async uninstall(id) {
-    const meta = await PluginManager.getById(id);
+    const meta = PluginRuntime.getMeta(id);
     if (!meta) throw new Error('Plugin tidak ditemukan.');
-
-    const all = await Storage.list();
-    const linked = all.filter(p => p.projectType === 'plugin' && p.pluginId === id);
-
+    const linked = (await Storage.list()).filter(p => p.projectType === 'plugin' && p.pluginId === id);
     const msg = linked.length
-      ? `Plugin "${meta.name}" akan dihapus.\n${linked.length} project terkait juga akan dihapus permanen:\n${linked.slice(0, 5).map(p => '• ' + p.name).join('\n')}${linked.length > 5 ? `\n…dan ${linked.length - 5} lainnya` : ''}\n\nLanjutkan?`
+      ? `Plugin "${meta.name}" akan dihapus.\n${linked.length} project terkait tetap tersimpan, tetapi butuh plugin ini agar bisa dibuka kembali.\n\nLanjutkan?`
       : `Plugin "${meta.name}" akan dihapus. Lanjutkan?`;
-
     if (!confirm(msg)) return false;
-
+    PluginRuntime._deactivate(id);
     for (const p of linked) {
-      try { await Storage.remove(p.id, p.epubSourceId); } catch {}
+      try {
+        const data = await Storage.load(p.id);
+        if (!data.pluginName) {
+          data.pluginName = meta.name;
+          await Storage.saveProject(p.id, data);
+        }
+      } catch {}
     }
     await Storage.removePluginFile(id);
-    await Storage.removePluginAssets(id);
-    await Storage.removePluginIndex(id);
-    await PluginManager.terminateWorker(id);
-    await PluginManager.refreshIndex();
+    PluginRuntime._index = PluginRuntime._index.filter(p => p.id !== id);
+    await PluginRuntime._persist();
+    PluginRuntime.applyTheme();
+    Shortcuts.refreshPluginActions();
     return true;
   },
 
-  async _spawnWorker(id, code, preloadJsZip) {
-    if (typeof Worker === 'undefined') throw new Error('Browser tidak mendukung Web Worker.');
-    const worker = new Worker('plugin-worker.js');
-    const entry = { worker, ready: null, initAt: Date.now(), terminated: false };
-    PluginManager._workerPool.set(id, entry);
-
-    worker.onmessage = (ev) => {
-      const msg = ev.data || {};
-
-      if (msg.id && PluginManager._rpcPending.has(msg.id)) {
-        const { resolve, reject } = PluginManager._rpcPending.get(msg.id);
-        PluginManager._rpcPending.delete(msg.id);
-        if (msg.type === 'result') {
-          if (msg.ok) resolve(msg.value);
-          else reject(new Error(msg.error || 'Plugin RPC gagal.'));
-        } else {
-          reject(new Error('Worker reply tidak dikenal: ' + msg.type));
-        }
-        return;
-      }
-
-      if (msg.type === 'ready') {
-        return; 
-      }
-      if (msg.type === 'log') {
-
-        try {
-          const args = (msg.args || []).map(a => (a && typeof a === 'object' && a.__error) ? new Error(a.message) : a);
-          (console[msg.level] || console.log)(`[plugin:${id}]`, ...args);
-        } catch {}
-        return;
-      }
-      if (msg.type === 'progress') {
-
-        try { Progress.update(msg.label, msg.value); } catch {}
-        return;
-      }
-    };
-    worker.onerror = (e) => {
-      console.error(`[plugin:${id}] worker error`, e);
-      const entry = PluginManager._workerPool.get(id);
-      if (entry && !entry.terminated) {
-
-        for (const [rid, { reject }] of PluginManager._rpcPending) {
-          try { reject(new Error('Worker crash: ' + (e.message || 'unknown'))); } catch {}
-          PluginManager._rpcPending.delete(rid);
-        }
-      }
-    };
-
-
-    const ready = PluginManager._rpc(worker, { type: 'init', code, pluginId: id, preloadJsZip: !!preloadJsZip })
-      .then(() => entry)
-      .catch((e) => {
-
-        try { worker.terminate(); } catch {}
-        PluginManager._workerPool.delete(id);
-        throw e;
-      });
-    entry.ready = ready;
-    await ready;
-    return entry;
+  resolveByExtension(fileName) {
+    const name = String(fileName || '');
+    const dot = name.lastIndexOf('.');
+    if (dot < 0) return null;
+    const ext = name.slice(dot).toLowerCase();
+    return PluginRuntime._index.find(p => p.enabled === true && (p.extensions || []).some(e => String(e).toLowerCase() === ext)) || null;
   },
 
-  _rpc(worker, msg) {
-    return new Promise((resolve, reject) => {
-      const id = PluginManager._workerRpcId++;
-      PluginManager._rpcPending.set(id, { resolve, reject });
-
-
-      worker.postMessage({ id, ...msg });
-    });
-  },
-
-  async terminateWorker(id) {
-    const entry = PluginManager._workerPool.get(id);
-    if (!entry) return;
-    entry.terminated = true;
-    try {
-      if (entry.ready) await entry.ready.catch(() => {});
-      entry.worker.terminate();
-    } catch {}
-    PluginManager._workerPool.delete(id);
-  },
-
-  async terminateAllWorkers() {
-    const ids = Array.from(PluginManager._workerPool.keys());
-    await Promise.all(ids.map(id => PluginManager.terminateWorker(id)));
-  },
-
-  async load(id) {
-    const meta = await PluginManager.getById(id);
-    const code = await Storage.loadPluginContent(id);
-    const entry = await PluginManager._spawnWorker(id, code, !!(meta && meta.wantsJsZip));
-    await PluginManager._rpc(entry.worker, { type: 'ping' }).catch(() => {});
+  _hookCtx() {
     return {
-      _viaWorker: true,
-      _id: id,
-      _entry: entry,
-      extract: async (input) => {
-        const { fileName, buffer, options } = input;
-        return await PluginManager._rpc(entry.worker, { type: 'call', method: 'extract', args: { fileName, buffer, options } });
-      },
-      pack: async (input) => {
-        const { lines, sourceMap, projectName, options } = input;
-        return await PluginManager._rpc(entry.worker, { type: 'call', method: 'pack', args: { lines, sourceMap, projectName, options } });
-      },
-      reset: async () => {
-        try { return await PluginManager._rpc(entry.worker, { type: 'call', method: 'reset', args: {} }); }
-        catch { return { ok: false }; }
-      }
+      projectName: State.projectName || null,
+      lineCount: State.lines.length,
+      translatedCount: State.translatedCount,
+      selectedLines: Array.from(State.selected)
     };
   },
 
-  applyDefaults(meta, userSettings) {
-    if (!meta || !Array.isArray(meta.settings)) return { ...userSettings };
-    const out = { ...userSettings };
-    for (const s of meta.settings) {
-      if (!(s.key in out) && 'default' in s) {
-        out[s.key] = s.default;
+  runCopyHook(text) {
+    let out = text;
+    for (const inst of PluginRuntime._instances.values()) {
+      if (typeof inst.exports.onCopy !== 'function') continue;
+      try {
+        const r = inst.exports.onCopy(out, PluginRuntime._hookCtx());
+        if (typeof r === 'string') out = r;
+      } catch (e) { PluginRuntime._fail(inst.meta, e); }
+    }
+    return out;
+  },
+
+  runApplyHook(text) {
+    let out = text;
+    for (const inst of PluginRuntime._instances.values()) {
+      if (typeof inst.exports.onApply !== 'function') continue;
+      try {
+        const r = inst.exports.onApply(out, PluginRuntime._hookCtx());
+        if (typeof r === 'string') out = r;
+      } catch (e) { PluginRuntime._fail(inst.meta, e); }
+    }
+    return out;
+  },
+
+  emit(event, payload) {
+    for (const inst of PluginRuntime._instances.values()) {
+      const set = inst.listeners.get(event);
+      if (!set || !set.size) continue;
+      for (const fn of set) {
+        try { fn(payload); } catch (e) { PluginRuntime._fail(inst.meta, e); }
       }
     }
+  },
+
+  commands() {
+    const out = [];
+    for (const inst of PluginRuntime._instances.values()) {
+      const cmds = inst.exports.commands;
+      if (!cmds || typeof cmds !== 'object') continue;
+      for (const [key, cmd] of Object.entries(cmds)) {
+        if (!cmd || typeof cmd !== 'object' || typeof cmd.run !== 'function') continue;
+        out.push({
+          id: `plugin.${inst.meta.id}.${key}`,
+          label: String(cmd.label || key),
+          pluginName: inst.meta.name,
+          run: cmd.run,
+          api: inst.api
+        });
+      }
+    }
+    return out;
+  },
+
+  runCommand(id) {
+    const cmd = PluginRuntime.commands().find(c => c.id === id);
+    if (!cmd) return;
+    try { cmd.run(cmd.api); }
+    catch (e) { PluginRuntime._fail({ id, name: cmd.pluginName }, e); }
+  },
+
+  renderMenu() {
+    const host = els.pluginMenu;
+    if (!host) return;
+    const html = [];
+    const cmds = PluginRuntime.commands();
+    if (cmds.length) {
+      let lastPlugin = null;
+      for (const c of cmds) {
+        if (c.pluginName !== lastPlugin) {
+          lastPlugin = c.pluginName;
+          html.push(`<div class="dropdown-label">${escapeHtml(c.pluginName)}</div>`);
+        }
+        const action = Shortcuts.allActions().find(a => a.id === c.id);
+        const combo = action ? Shortcuts.bindingFor(action) : '';
+        html.push(`<button type="button" class="dropdown-item" data-cmd="${escapeHtml(c.id)}"><span class="menu-label">${escapeHtml(c.label)}</span>${combo ? `<span class="menu-kbd">${comboHtml(combo)}</span>` : ''}</button>`);
+      }
+    }
+    const active = PluginRuntime.listMeta().filter(p => p.enabled === true);
+    const settable = active.filter(p => Array.isArray(p.settings) && p.settings.length > 0);
+    if (settable.length) {
+      if (cmds.length) html.push('<div class="dropdown-sep"></div>');
+      html.push('<div class="dropdown-label">Pengaturan</div>');
+      const gear = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+      for (const p of settable) {
+        html.push(`<button type="button" class="dropdown-item plugin-settings-item" data-plugin-settings="${escapeHtml(p.id)}" title="Buka pengaturan plugin ini"><span class="menu-label">${escapeHtml(p.name)}</span><span class="menu-icon-btn">${gear}</span></button>`);
+      }
+    }
+    if (!cmds.length && !settable.length) {
+      html.push(active.length
+        ? '<div class="dropdown-hint">Plugin aktif tidak memiliki perintah atau pengaturan.</div>'
+        : '<div class="dropdown-hint">Belum ada plugin aktif. Kelola plugin lewat Pengaturan di halaman utama.</div>');
+    }
+    host.innerHTML = html.join('');
+  },
+
+  async callExtract(meta, input) {
+    const inst = PluginRuntime._instances.get(meta.id);
+    if (!inst) throw new Error(`Plugin "${meta.name}" tidak aktif.`);
+    if (typeof inst.exports.extract !== 'function') throw new Error(`Plugin "${meta.name}" tidak mendukung extract.`);
+    const out = await inst.exports.extract({ ...input, api: inst.api });
+    if (!out || !Array.isArray(out.lines)) throw new Error(`Plugin "${meta.name}" tidak mengembalikan lines array.`);
+    return out;
+  },
+
+  async callPack(meta, input) {
+    const inst = PluginRuntime._instances.get(meta.id);
+    if (!inst) throw new Error(`Plugin "${meta.name}" tidak aktif.`);
+    if (typeof inst.exports.pack !== 'function') throw new Error(`Plugin "${meta.name}" tidak mendukung pack.`);
+    const out = await inst.exports.pack({ ...input, api: inst.api });
+    if (!out || !(out.blob instanceof Blob)) throw new Error(`Plugin "${meta.name}" tidak mengembalikan blob yang valid.`);
     return out;
   },
 
@@ -951,7 +1172,7 @@ const PluginManager = {
         line_num: n++,
         file: String(l.file || ''),
         name: l.name == null ? null : stripNewlines(l.name),
-        message: String(l.message).replace(/\r?\n/g, '\\n').trim(),
+        message: msg.replace(/\r?\n/g, '\\n').trim(),
         trans_name: null,
         trans_message: null,
         is_translated: false,
@@ -971,6 +1192,11 @@ const PluginManager = {
       trans_message: l.trans_message,
       is_translated: !!l.is_translated
     };
+  },
+
+  _fail(meta, e) {
+    console.error(`[plugin:${meta?.id || '?'}]`, e);
+    App.flash(`Plugin "${meta?.name || '?'}" error: ${e?.message || e}`);
   }
 };
 
@@ -1384,11 +1610,6 @@ async function restoreOne(zip, fallbackName, onProgress) {
   if (names.length && names[names.length - 1] === '') names.pop();
   if (orig.length !== trans.length || orig.length !== names.length) throw new Error('Baris tidak sinkron.');
 
-  if (meta.projectType === 'plugin' && meta.pluginId) {
-    const installed = await PluginManager.getById(meta.pluginId);
-    if (!installed) throw Object.assign(new Error(`Plugin "${meta.pluginId}" tidak terpasang.`), { pluginMissing: true, pluginId: meta.pluginId });
-  }
-
   const total = orig.length;
   const lines = new Array(total);
   let file = 'unknown', n = 1;
@@ -1436,8 +1657,8 @@ async function restoreOne(zip, fallbackName, onProgress) {
     projectName: name,
     projectType: meta.projectType || 'uninitialized',
     pluginId: meta.pluginId || null,
+    pluginName: meta.pluginName || PluginRuntime.getMeta(meta.pluginId)?.name || null,
     pluginData: (meta.pluginData && typeof meta.pluginData === 'object') ? meta.pluginData : null,
-    pluginSettings: (meta.pluginSettings && typeof meta.pluginSettings === 'object') ? meta.pluginSettings : null,
     epubTags: meta.epubTags || 'p',
     epubSourceId: meta.epubSourceId || null,
     imported_files: meta.imported_files || [],
@@ -1455,6 +1676,8 @@ async function restoreOne(zip, fallbackName, onProgress) {
     customRaw: meta.customRaw || '',
     jumpToContext: meta.jumpToContext ?? false,
     hideTools: meta.hideTools ?? false,
+    incrementEnabled: meta.incrementEnabled ?? false,
+    incrementStep: meta.incrementStep || 100,
     bookmarks: Array.isArray(meta.bookmarks) ? meta.bookmarks.filter(n => Number.isInteger(n) && n > 0) : [],
     images: Array.isArray(meta.images) ? meta.images : []
   });
@@ -1480,7 +1703,6 @@ async function parseRestore(buffer, fallbackName, onProgress) {
 
   const totalEntries = entries.length;
   let ok = 0, fail = 0;
-  const missing = new Set();
   for (let i = 0; i < totalEntries; i++) {
     const entry = entries[i];
     try {
@@ -1488,14 +1710,13 @@ async function parseRestore(buffer, fallbackName, onProgress) {
       await inner.loadAsync(await entry.async('blob'));
       await restoreOne(inner, entry.name.replace(/\.cstl$/i, ''));
       ok++;
-    } catch (e) {
+    } catch {
       fail++;
-      if (e.pluginMissing) missing.add(e.pluginId);
     }
     onProgress(`${i + 1} / ${totalEntries} project`, ((i + 1) / totalEntries) * 100);
     await yieldToEvent();
   }
-  return { single: false, ok, fail, missing: Array.from(missing) };
+  return { single: false, ok, fail };
 }
 
 function buildRe(query, regex, exact, caseSensitive) {
@@ -1607,6 +1828,203 @@ const Vndb = {
   }
 };
 
+const SHORTCUT_ACTIONS = [
+  { id: 'dash.new', label: 'Buat Project Baru', scope: 'dashboard', def: '', run: () => els.btnNewProject.click() },
+  { id: 'dash.restore', label: 'Pulihkan Project', scope: 'dashboard', def: '', run: () => els.btnRestoreProject.click() },
+  { id: 'dash.settings', label: 'Buka Pengaturan Utama', scope: 'dashboard', def: '', run: () => els.btnDashboardSettings.click() },
+  { id: 'dash.search', label: 'Fokus Cari Project', scope: 'dashboard', def: '/', run: () => els.projectSearch?.focus() },
+  { id: 'work.importFile', label: 'Import File', scope: 'workspace', def: '', run: () => { closeDropdowns(); els.importFileInput.click(); } },
+  { id: 'work.importFolder', label: 'Import Folder', scope: 'workspace', def: '', run: () => { closeDropdowns(); els.importFolderInput.click(); } },
+  { id: 'work.importZip', label: 'Import ZIP', scope: 'workspace', def: '', run: () => { closeDropdowns(); els.importZipInput.click(); } },
+  { id: 'work.export', label: 'Export Project', scope: 'workspace', def: 'Alt+E', run: () => Exporter.run() },
+  { id: 'work.proofread', label: 'Buka Cari & Replace', scope: 'workspace', def: 'Alt+R', run: () => els.btnProofread.click() },
+  { id: 'work.glossary', label: 'Buka Glossary', scope: 'workspace', def: 'Alt+G', run: () => els.btnGlossary.click() },
+  { id: 'work.context', label: 'Buka Context', scope: 'workspace', def: 'Alt+X', run: () => els.btnContext.click() },
+  { id: 'work.plugins', label: 'Buka Menu Plugin Project', scope: 'workspace', def: 'Alt+P', run: () => els.btnOpenPlugins.click() },
+  { id: 'work.settings', label: 'Buka Pengaturan Project', scope: 'workspace', def: 'Alt+S', run: () => els.btnSettings.click() },
+  { id: 'work.toggleToolbar', label: 'Tampil/Sembunyikan Toolbar', scope: 'workspace', def: 'Alt+T', run: () => els.btnToggleHeader.click() },
+  { id: 'work.back', label: 'Kembali ke Dashboard', scope: 'workspace', def: 'Alt+B', run: () => App.closeProject() },
+  { id: 'work.selectAll', label: 'Pilih Semua Baris', scope: 'workspace', def: 'Alt+A', run: () => els.btnSelectAll.click() },
+  { id: 'work.clearSelection', label: 'Hapus Pilihan', scope: 'workspace', def: 'Alt+Q', run: () => els.btnClearSelection.click() },
+  { id: 'work.selectRange', label: 'Pilih Rentang Baris', scope: 'workspace', def: 'Alt+L', run: () => App.selectRange() },
+  { id: 'work.copy', label: 'Copy untuk AI', scope: 'workspace', def: 'Alt+C', run: () => App.copyForAi() },
+  { id: 'work.paste', label: 'Fokus Kolom Hasil AI', scope: 'workspace', def: 'Alt+V', inInputs: true, run: () => els.pasteArea.focus() },
+  { id: 'work.apply', label: 'Terapkan Terjemahan', scope: 'workspace', def: 'Ctrl+Enter', inInputs: true, run: () => App.applyTranslation() },
+  { id: 'work.undo', label: 'Undo', scope: 'workspace', def: 'Alt+Z', run: () => App.undo() },
+  { id: 'work.redo', label: 'Redo', scope: 'workspace', def: 'Alt+Y', run: () => App.redo() },
+  { id: 'work.bookmarks', label: 'Buka Panel Bookmark', scope: 'workspace', def: 'Alt+M', run: () => App.toggleBookmarkPanel(!els.bookmarkPanel.classList.contains('show')) }
+];
+
+const IGNORED_KEYS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock', 'Dead', 'Unidentified', 'ContextMenu', 'Fn', 'FnLock', 'NumLock', 'ScrollLock', 'Hyper', 'Super', 'Compose', 'Process']);
+
+const CODE_MAP = {
+  Space: 'Space', Enter: 'Enter', NumpadEnter: 'Enter', Escape: 'Escape', Backspace: 'Backspace',
+  Delete: 'Delete', Tab: 'Tab', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown', Insert: 'Insert',
+  Slash: '/', Period: '.', Comma: ',', Semicolon: ';', Quote: "'", BracketLeft: '[', BracketRight: ']',
+  Backslash: '\\', Minus: '-', Equal: '=', Backquote: '`',
+  NumpadDivide: '/', NumpadMultiply: '*', NumpadSubtract: '-', NumpadAdd: '+', NumpadDecimal: '.'
+};
+
+function normalizeKey(e) {
+  if (IGNORED_KEYS.has(e.key)) return null;
+  const code = e.code || '';
+  const m = code.match(/^(?:Key([A-Z])|Digit(\d))$/);
+  if (m) return m[1] || m[2];
+  if (CODE_MAP[code]) return CODE_MAP[code];
+  if (/^F\d{1,2}$/.test(code)) return code;
+  const k = e.key || '';
+  if (k.length === 1) return k.toUpperCase();
+  return null;
+}
+
+function comboFromEvent(e) {
+  const key = normalizeKey(e);
+  if (!key) return null;
+  const parts = [];
+  if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
+  if (e.altKey) parts.push('Alt');
+  if (e.shiftKey) parts.push('Shift');
+  parts.push(key);
+  return parts.join('+');
+}
+
+function comboHtml(combo) {
+  return combo.split('+').map(p => `<kbd>${escapeHtml(p)}</kbd>`).join('<span class="kbd-plus">+</span>');
+}
+
+function isEditableTarget(t) {
+  if (!t) return false;
+  const tag = t.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable;
+}
+
+const Shortcuts = {
+  _actions: [],
+  _pluginActions: [],
+  _map: new Map(),
+  _recording: null,
+
+  init() {
+    Shortcuts._actions = SHORTCUT_ACTIONS.slice();
+    document.addEventListener('keydown', e => Shortcuts._onKey(e));
+    Shortcuts.rebuild();
+  },
+
+  allActions() { return Shortcuts._actions.concat(Shortcuts._pluginActions); },
+
+  loadBindings() {
+    try { return JSON.parse(localStorage.getItem(SHORTCUT_STORAGE_KEY)) || {}; }
+    catch { return {}; }
+  },
+
+  saveBindings(b) {
+    try { localStorage.setItem(SHORTCUT_STORAGE_KEY, JSON.stringify(b)); } catch {}
+  },
+
+  bindingFor(action) {
+    const b = Shortcuts.loadBindings();
+    return action.id in b ? b[action.id] : (action.def || '');
+  },
+
+  rebuild() {
+    Shortcuts._map = new Map();
+    const b = Shortcuts.loadBindings();
+    for (const a of Shortcuts.allActions()) {
+      const combo = a.id in b ? b[a.id] : (a.def || '');
+      if (combo && !Shortcuts._map.has(combo)) Shortcuts._map.set(combo, a.id);
+    }
+  },
+
+  refreshPluginActions() {
+    Shortcuts._pluginActions = PluginRuntime.commands().map(c => ({
+      id: c.id,
+      label: `${c.pluginName}: ${c.label}`,
+      scope: 'always',
+      def: '',
+      run: () => PluginRuntime.runCommand(c.id)
+    }));
+    Shortcuts.rebuild();
+    if (els?.shortcutModal?.classList.contains('open')) App.renderShortcutList();
+  },
+
+  _onKey(e) {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (Shortcuts._recording) return;
+    if (anyModalOpen()) return;
+    if (els.busyOverlay?.classList.contains('open')) return;
+    const combo = comboFromEvent(e);
+    if (!combo) return;
+    const actionId = Shortcuts._map.get(combo);
+    if (!actionId) return;
+    const action = Shortcuts.allActions().find(a => a.id === actionId);
+    if (!action) return;
+    if (isEditableTarget(e.target) && !action.inInputs) return;
+    const dashOpen = els.dashboardView.classList.contains('open');
+    if (action.scope === 'dashboard' && !dashOpen) return;
+    if (action.scope === 'workspace' && dashOpen) return;
+    e.preventDefault();
+    try { action.run(); } catch (err) { console.error('[shortcut]', actionId, err); }
+  },
+
+  startRecording(action, btn) {
+    if (Shortcuts._recording) Shortcuts.stopRecording();
+    Shortcuts._recording = { action, btn };
+    btn.classList.add('recording');
+    btn.textContent = 'Tekan tombol…';
+    document.addEventListener('keydown', Shortcuts._handleRecordKey, true);
+  },
+
+  stopRecording() {
+    if (!Shortcuts._recording) return;
+    document.removeEventListener('keydown', Shortcuts._handleRecordKey, true);
+    Shortcuts._recording = null;
+    App.renderShortcutList();
+  },
+
+  _handleRecordKey(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const rec = Shortcuts._recording;
+    if (!rec) return;
+    if (e.key === 'Escape') { Shortcuts.stopRecording(); return; }
+    if (e.key === 'Backspace') { Shortcuts.applyBinding(rec.action, ''); return; }
+    const combo = comboFromEvent(e);
+    if (!combo) return;
+    Shortcuts.applyBinding(rec.action, combo);
+  },
+
+  applyBinding(action, combo) {
+    Shortcuts.stopRecording();
+    if (combo) {
+      const owner = Shortcuts.allActions().find(a => a.id !== action.id && Shortcuts.bindingFor(a) === combo);
+      if (owner) {
+        Shortcuts.showStatus(`"${combo.replace(/\+/g, ' + ')}" sudah dipakai: ${owner.label}`, true);
+        return;
+      }
+    }
+    const b = Shortcuts.loadBindings();
+    if (combo) b[action.id] = combo; else delete b[action.id];
+    Shortcuts.saveBindings(b);
+    Shortcuts.rebuild();
+    App.renderShortcutList();
+    Shortcuts.showStatus(combo ? `Pengikatan disimpan: ${combo.replace(/\+/g, ' + ')}.` : 'Pengikatan dihapus.');
+  },
+
+  showStatus(msg, isError = false) {
+    const el = els.shortcutStatus;
+    if (!el) return;
+    clearTimeout(Shortcuts._statusTimer);
+    el.textContent = msg;
+    el.hidden = false;
+    el.classList.toggle('error', isError);
+    Shortcuts._statusTimer = setTimeout(() => {
+      el.hidden = true;
+      el.classList.remove('error');
+    }, 3000);
+  }
+};
+
 const els = {};
 
 function cacheEls() {
@@ -1630,6 +2048,7 @@ function cacheEls() {
     'btnCopyNamesPlain', 'btnCopyNamesWithGlossary', 'btnCopyNamesMissingGlossary',
     'settingsModal', 'btnSettingsDasarReset', 'settingsIgnoreNameCheck', 'settingsPromptCheck',
     'settingsJumpToContextCheck', 'settingsHideToolsCheck',
+    'btnSettingsIncrementReset', 'settingsIncrementCheck', 'settingsIncrementStepInput',
     'btnSettingsPromptReset', 'settingsPromptInput', 'btnSettingsEpubReset', 'settingsEpubTagsInput',
     'btnSettingsCancel', 'btnSettingsSave',
     'glossaryModal', 'btnGlossaryVndbReset', 'glossaryVndbCheck', 'glossaryVndbWrap',
@@ -1644,11 +2063,10 @@ function cacheEls() {
     'proofreadCaseCheck', 'proofreadExactCheck', 'proofreadTranslatedOnlyCheck',
     'btnProofreadReset', 'proofreadReplaceInput', 'btnProofreadReplaceAll',
     'proofreadStatus', 'proofreadContainer', 'btnProofreadClose',
-    'dashboardSettingsModal',
+    'dashboardSettingsModal', 'shortcutModal', 'shortcutStatus', 'shortcutList', 'btnShortcutsOpen', 'btnShortcutsClose', 'btnShortcutsResetAll',
     'btnPluginManagerOpen',
     'pluginManagerModal', 'btnPluginManagerClose', 'btnPluginRefresh',
-    'pluginList', 'btnInstallPlugin', 'pluginFileInput',
-    'btnProjectPlugins', 'projectPluginModal', 'btnProjectPluginClose', 'projectPluginList',
+    'pluginList', 'btnInstallPlugin', 'pluginFileInput', 'btnOpenPlugins', 'pluginMenu',
     'opfsExplorerModal', 'btnOpfsExplorerOpen', 'btnOpfsExplorerClose',
     'opfsExplorer', 'opfsList', 'opfsEmpty', 'opfsEmptyText', 'opfsCrumbs', 'opfsLoading', 'btnOpfsRefresh',
     'busyOverlay', 'busyTitle', 'busyMsg', 'busyBarFill',
@@ -1723,33 +2141,14 @@ State.loadFromData = (data) => {
   if (!State.projectName) State.projectName = 'Unknown';
 };
 
-State.pluginSettingsFor = (pluginId) => {
-  const map = (State.pluginSettings && typeof State.pluginSettings === 'object') ? State.pluginSettings : {};
-  const v = map[pluginId];
-  return (v && typeof v === 'object') ? v : {};
-};
-
-State.setPluginSettings = (pluginId, settings) => {
-  const map = (State.pluginSettings && typeof State.pluginSettings === 'object') ? { ...State.pluginSettings } : {};
-  map[pluginId] = settings;
-  State.pluginSettings = map;
-};
-
-State.clearPluginSettings = (pluginId) => {
-  if (!State.pluginSettings || typeof State.pluginSettings !== 'object') return;
-  const map = { ...State.pluginSettings };
-  delete map[pluginId];
-  State.pluginSettings = Object.keys(map).length ? map : null;
-};
-
 State.resetTransient = () => {
   State.projectId = null;
   State.projectName = '';
   State.projectType = 'uninitialized';
   State.epubSourceId = null;
   State.pluginId = null;
+  State.pluginName = null;
   State.pluginData = null;
-  State.pluginSettings = null;
   State.files = [];
   State.lines = [];
   State.rows = [];
@@ -1768,6 +2167,7 @@ State.resetTransient = () => {
   State.hideTools = false;
   State.bookmarks = [];
   State.images = [];
+  State.pluginSettings = {};
 };
 
 State.initNewProject = () => {
@@ -1775,8 +2175,8 @@ State.initNewProject = () => {
   State.epubTags = 'p';
   State.epubSourceId = null;
   State.pluginId = null;
+  State.pluginName = null;
   State.pluginData = null;
-  State.pluginSettings = null;
   State.lines = [];
   State.files = [];
   State.prompt = State.prompt || DEFAULT_PROMPT;
@@ -1792,8 +2192,11 @@ State.initNewProject = () => {
   State.customRaw = '';
   State.jumpToContext = false;
   State.hideTools = false;
+  State.incrementEnabled = false;
+  State.incrementStep = 100;
   State.bookmarks = [];
   State.images = [];
+  State.pluginSettings = {};
   State.selected.clear();
   State.undo = State.redo = null;
   State.namesDirty = true;
@@ -2069,27 +2472,6 @@ class Scroller {
     return false;
   }
 
-  remeasureEl(el) {
-    const idx = this.els.indexOf(el);
-    if (idx === -1) return;
-    const di = this.indices[idx];
-    if (di === -1 || di == null) return;
-    const h = el.offsetHeight;
-    if (!h) return;
-    const total = this.items[di]?.type === 'header' ? h : h + this.gap;
-    if (Math.abs(total - this.heights[di]) <= 1) return;
-    const scrollTop = this.scrollTop;
-    const adjust = this.pos[di] < scrollTop ? total - this.heights[di] : 0;
-    this.heights[di] = total;
-    this.heightCache.set(this.keys[di], total);
-    this.updatePos();
-    if (adjust) { this.vp.scrollTop += adjust; this.scrollTop = this.vp.scrollTop; }
-    for (let i = 0; i < this.els.length; i++) {
-      const d = this.indices[i];
-      if (d !== -1) this.els[i].style.transform = `translateY(${this.pos[d]}px)`;
-    }
-  }
-
   scrollToIndex(idx) {
     if (idx < 0 || idx >= this.items.length) return;
     const vh = this.vp.clientHeight || 800;
@@ -2107,7 +2489,7 @@ class Scroller {
 }
 
 function positionDropdown(panelId) {
-  const triggerMap = { importDropdown: 'btnImportMain', copyNamesDropdown: 'btnCopyAllNames' };
+  const triggerMap = { importDropdown: 'btnImportMain', copyNamesDropdown: 'btnCopyAllNames', pluginMenu: 'btnOpenPlugins' };
   const trigger = els[triggerMap[panelId]];
   const dropdown = els[panelId];
   if (!trigger || !dropdown) return;
@@ -2169,6 +2551,7 @@ const Importer = {
     if (State.projectType === 'uninitialized') {
       State.projectType = 'plugin';
       State.pluginId = pluginMeta.id;
+      State.pluginName = pluginMeta.name;
     }
     return true;
   },
@@ -2176,19 +2559,16 @@ const Importer = {
   async processPlugin(files) {
     const sorted = files.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
     const first = sorted[0];
-    const sample = new Uint8Array(await first.slice(0, 64).arrayBuffer());
-    const pluginMeta = await PluginManager.resolvePlugin(first.name, sample);
-    if (!pluginMeta) throw new Error(`Tidak ada plugin terpasang yang cocok untuk file "${first.name}".`);
-    if (!Importer.assertPluginProjectType(pluginMeta)) return null;
-    const plugin = await PluginManager.load(pluginMeta.id);
+    const meta = PluginRuntime.resolveByExtension(first.name);
+    if (!meta) throw new Error(`Tidak ada plugin aktif yang menangani file "${first.name}".`);
+    if (!Importer.assertPluginProjectType(meta)) return null;
+    const settings = PluginRuntime.valuesFor(meta);
     const startNum = State.lines.length ? State.lines.reduce((m, l) => Math.max(m, l.line_num), 0) + 1 : 1;
     const existing = new Set(State.files);
     const imported = [];
     const images = [];
     let cur = startNum;
     const pluginData = State.pluginData && typeof State.pluginData === 'object' ? { ...State.pluginData } : {};
-    const userSettings = State.pluginSettingsFor(pluginMeta.id);
-    const options = PluginManager.applyDefaults(pluginMeta, userSettings);
     Progress.determinate('Plugin: Mengimpor', `0 / ${sorted.length} file`);
     for (let i = 0; i < sorted.length; i++) {
       const f = sorted[i];
@@ -2197,16 +2577,11 @@ const Importer = {
       const buffer = new Uint8Array(await f.arrayBuffer());
       let out;
       try {
-        out = await plugin.extract({
-          fileName: f.name,
-          buffer,
-          options
-        });
+        out = await PluginRuntime.callExtract(meta, { fileName: f.name, buffer, settings });
       } catch (e) {
-        throw new Error(`Plugin "${pluginMeta.name}" gagal parse ${bn}: ${e.message}`);
+        throw new Error(`Plugin "${meta.name}" gagal parse ${bn}: ${e.message}`);
       }
-      if (!out || !Array.isArray(out.lines)) throw new Error(`Plugin "${pluginMeta.name}" tidak mengembalikan lines array.`);
-      const lines = PluginManager.normalizePluginLines(out.lines, cur);
+      const lines = PluginRuntime.normalizePluginLines(out.lines, cur);
       for (const l of lines) l.file = l.file || bn;
       if (lines.length) {
         existing.add(bn);
@@ -2249,14 +2624,11 @@ const Importer = {
         const files = Array.from(input).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
         const hasEpub = files.some(f => f.name.toLowerCase().endsWith('.epub'));
         const hasJson = files.some(f => f.name.toLowerCase().endsWith('.json'));
-        const pluginMatch = await (async () => {
-          for (const f of files) {
-            const sample = new Uint8Array(await f.slice(0, 64).arrayBuffer());
-            const p = await PluginManager.resolvePlugin(f.name, sample);
-            if (p) return p;
-          }
-          return null;
-        })();
+        let pluginMatch = null;
+        for (const f of files) {
+          pluginMatch = PluginRuntime.resolveByExtension(f.name);
+          if (pluginMatch) break;
+        }
 
         if (pluginMatch && (hasEpub || hasJson)) {
           Progress.hide();
@@ -2308,6 +2680,7 @@ const Importer = {
         App.refresh(true);
         State.queueSave();
         App.flash(`Berhasil impor ${result.imported.length} baris.${result.skipped.length ? ` (${result.skipped.length} file duplikat diabaikan)` : ''}`);
+        PluginRuntime.emit('import', { lineCount: result.imported.length, fileCount: (result.existing || existing).length });
       } else if (result.skipped.length) {
         els.copyStatus.classList.add('empty');
         setTimeout(() => alert(`Gagal impor: File duplikat.\n- ${result.skipped.slice(0, 5).join('\n- ')}`), 10);
@@ -2325,6 +2698,7 @@ const Exporter = {
       const result = await buildExportEpub(State.epubSourceId, State.lines, State.epubTags || 'p', State.projectName, Progress.update);
       download(URL.createObjectURL(result.blob), result.name);
       App.flash('Ekspor EPUB berhasil!');
+      PluginRuntime.emit('export', { filename: result.name });
     }, e => 'Ekspor EPUB gagal: ' + e.message);
   },
 
@@ -2334,34 +2708,29 @@ const Exporter = {
       const result = await buildExportJson(State.lines, State.projectName, Progress.update);
       download(URL.createObjectURL(result.blob), result.name);
       App.flash('Ekspor JSON berhasil!');
+      PluginRuntime.emit('export', { filename: result.name });
     }, e => 'Ekspor JSON gagal: ' + e.message);
   },
 
   async runPlugin() {
     await withProgress('Membuat file via plugin...', 'Memuat plugin...', async () => {
-      const pluginMeta = await PluginManager.getById(State.pluginId);
-      if (!pluginMeta) throw new Error('Plugin untuk project ini tidak lagi terpasang. Project tidak bisa diekspor.');
-      const plugin = await PluginManager.load(pluginMeta.id);
-      const lines = State.lines.map(PluginManager.toPluginLine);
+      const meta = PluginRuntime.getMeta(State.pluginId);
+      if (!meta) throw new Error('Plugin untuk project ini tidak lagi terpasang. Project tidak bisa diekspor.');
+      if (!meta.enabled) throw new Error('Plugin ini dinonaktifkan. Aktifkan di Plugin Manager terlebih dahulu.');
+      const lines = State.lines.map(PluginRuntime.toPluginLine);
       const pluginData = (State.pluginData && typeof State.pluginData === 'object') ? State.pluginData : {};
-      const userSettings = State.pluginSettingsFor(pluginMeta.id);
-      const options = PluginManager.applyDefaults(pluginMeta, userSettings);
+      const settings = PluginRuntime.valuesFor(meta);
       Progress.determinate('Plugin: Membuat output', `0 file`);
-      let out;
-      try {
-        out = await plugin.pack({
-          lines,
-          sourceMap: pluginData,
-          projectName: State.projectName || 'untitled',
-          options
-        });
-      } catch (e) {
-        throw new Error('Plugin error saat pack: ' + e.message);
-      }
-      if (!out || !(out.blob instanceof Blob)) throw new Error('Plugin tidak mengembalikan blob yang valid.');
-      const filename = out.filename || (sanitizeName(State.projectName) + '_tl' + (pluginMeta.extensions[0] || '.bin'));
+      const out = await PluginRuntime.callPack(meta, {
+        lines,
+        sourceMap: pluginData,
+        projectName: State.projectName || 'untitled',
+        settings
+      });
+      const filename = out.filename || (sanitizeName(State.projectName) + '_tl' + (meta.extensions[0] || '.bin'));
       download(URL.createObjectURL(out.blob), filename);
       App.flash('Ekspor plugin berhasil!');
+      PluginRuntime.emit('export', { filename });
     }, e => 'Ekspor plugin gagal: ' + e.message);
   },
 
@@ -2443,19 +2812,14 @@ const App = {
     );
 
     App.bind();
+    Shortcuts.init();
+    await PluginRuntime.init();
+    App.renderPluginList();
     await App.loadDashboard();
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(() => {});
     }
-
-
-    window.addEventListener('beforeunload', () => {
-      try { PluginManager.terminateAllWorkers(); } catch {}
-    });
-    window.addEventListener('pagehide', () => {
-      try { PluginManager.terminateAllWorkers(); } catch {}
-    });
   },
 
   bind() {
@@ -2471,7 +2835,6 @@ const App = {
     App.bindPreview();
     App.bindNames();
     App.bindBookmarks();
-    App.renderPluginList();
   },
 
   bindToolbar() {
@@ -2507,8 +2870,21 @@ const App = {
 
     App.bindSortDropdown();
 
-    els.btnDashboardSettings.addEventListener('click', () => toggleModal(els.dashboardSettingsModal, true));
+    els.btnDashboardSettings.addEventListener('click', () => {
+      toggleModal(els.dashboardSettingsModal, true);
+    });
     els.btnDashboardSettingsClose.addEventListener('click', () => toggleModal(els.dashboardSettingsModal, false));
+    els.btnShortcutsOpen?.addEventListener('click', () => {
+      App.renderShortcutList();
+      toggleModal(els.shortcutModal, true);
+    });
+    els.btnShortcutsClose?.addEventListener('click', () => toggleModal(els.shortcutModal, false));
+    els.btnShortcutsResetAll?.addEventListener('click', () => {
+      if (!confirm('Reset semua shortcut ke default?')) return;
+      try { localStorage.removeItem(SHORTCUT_STORAGE_KEY); } catch {}
+      Shortcuts.rebuild();
+      App.renderShortcutList();
+    });
     els.btnBackupAll.addEventListener('click', App.backupAll);
     els.btnWipeAllData.addEventListener('click', App.wipeAllData);
 
@@ -2519,30 +2895,37 @@ const App = {
     });
     els.btnOpfsExplorerClose?.addEventListener('click', () => {
       toggleModal(els.opfsExplorerModal, false);
-      if (els.dashboardView && els.dashboardView.classList.contains('open')) {
-        try { App.loadDashboard(); } catch {}
-      }
+      App.loadDashboard();
     });
     els.btnOpfsRefresh?.addEventListener('click', () => OpfsExplorer.refresh());
     els.opfsList?.addEventListener('click', e => OpfsExplorer.handleClick(e));
 
     els.btnPluginManagerOpen?.addEventListener('click', () => {
-      toggleModal(els.pluginManagerModal, true);
-      App.renderPluginList();
+      App.openPluginManager();
     });
     els.btnPluginManagerClose?.addEventListener('click', () => {
       toggleModal(els.pluginManagerModal, false);
-      if (els.dashboardView && els.dashboardView.classList.contains('open')) {
-        try { App.loadDashboard(); } catch {}
-      }
+      App.loadDashboard();
     });
     els.btnPluginRefresh?.addEventListener('click', () => App.renderPluginList());
 
-    els.btnProjectPlugins?.addEventListener('click', () => {
-      toggleModal(els.projectPluginModal, true);
-      App.renderProjectPluginList();
+    els.btnOpenPlugins?.addEventListener('click', () => {
+      PluginRuntime.renderMenu();
     });
-    els.btnProjectPluginClose?.addEventListener('click', () => toggleModal(els.projectPluginModal, false));
+
+    els.pluginMenu?.addEventListener('click', e => {
+      const setBtn = e.target.closest('[data-plugin-settings]');
+      if (setBtn) {
+        closeDropdowns();
+        const meta = PluginRuntime.getMeta(setBtn.dataset.pluginSettings);
+        if (meta) App.openPluginSettings(meta);
+        return;
+      }
+      const btn = e.target.closest('[data-cmd]');
+      if (!btn) return;
+      closeDropdowns();
+      PluginRuntime.runCommand(btn.dataset.cmd);
+    });
 
     if (els.btnInstallPlugin) {
       els.btnInstallPlugin.addEventListener('click', () => els.pluginFileInput?.click());
@@ -2571,7 +2954,8 @@ const App = {
         e.preventDefault();
         pluginListEl.classList.remove('dragover');
         for (const f of Array.from(e.dataTransfer.files)) {
-          if (f.name.toLowerCase().endsWith('.zip')) {
+          const n = f.name.toLowerCase();
+          if (n.endsWith('.zip')) {
             await App.installPlugin(f);
             break;
           }
@@ -2838,14 +3222,24 @@ const App = {
     els.btnSettingsDasarReset.addEventListener('click', () => App.resetSettingsModal('dasar'));
     els.btnSettingsPromptReset.addEventListener('click', () => { els.settingsPromptInput.value = DEFAULT_PROMPT; });
     els.btnSettingsEpubReset.addEventListener('click', () => { els.settingsEpubTagsInput.value = 'p'; });
+    els.btnSettingsIncrementReset?.addEventListener('click', () => {
+      els.settingsIncrementCheck.checked = false;
+      els.settingsIncrementStepInput.value = 100;
+    });
     els.btnSettingsCancel.addEventListener('click', () => toggleModal(els.settingsModal, false));
     els.btnSettingsSave.addEventListener('click', () => {
       SETTINGS_FIELDS.forEach(({ id, key, type, def }) => {
         if (type === 'check') State[key] = els[id].checked;
+        else if (type === 'number') State[key] = Math.max(1, Math.floor(Number(els[id].value) || def));
         else State[key] = els[id].value.trim() || def;
       });
       App.applyHideTools();
       toggleModal(els.settingsModal, false);
+      if (State.incrementEnabled && State.projectId && State.lines.length) {
+        const from = parseInt(els.rangeFromInput.value, 10);
+        const to = parseInt(els.rangeToInput.value, 10);
+        if (!(from >= 1 && to >= from)) App.prefillIncrement();
+      }
       State.queueSave();
     });
   },
@@ -3125,7 +3519,6 @@ const App = {
     State.initNewProject();
     State.projectId = id;
     State.projectName = name;
-    try { await PluginManager.terminateAllWorkers(); } catch {}
     try {
       await Storage.saveProject(id, State.toData());
       App.open(id, State.toData());
@@ -3149,10 +3542,19 @@ const App = {
     els.projectNameDisplay.textContent = State.projectName;
     els.dashboardView.classList.remove('open');
     els.workspaceView.style.display = 'flex';
+    PluginRuntime.applyTheme();
+    Shortcuts.refreshPluginActions();
+    App.syncImportAccept(PluginRuntime.listMeta().filter(p => p.enabled === true));
     App.applyHideTools();
     App.refresh(false);
     App.syncBookmarkUI();
     App.toggleBookmarkPanel(false);
+    PluginRuntime.emit('projectOpen', {
+      name: State.projectName,
+      type: State.projectType,
+      lineCount: State.lines.length,
+      translatedCount: State.translatedCount
+    });
   },
 
   closeProject() {
@@ -3171,8 +3573,16 @@ const App = {
   },
 
   finishClose() {
+    PluginRuntime.emit('projectClose', {
+      name: State.projectName,
+      lineCount: State.lines.length,
+      translatedCount: State.translatedCount
+    });
     EpubImages.clear();
     State.resetTransient();
+    PluginRuntime.applyTheme();
+    Shortcuts.refreshPluginActions();
+    App.syncImportAccept(PluginRuntime.listMeta());
     App.main?.setItems([], false);
     App.pr?.setItems([], false);
     els.nameTableBody.replaceChildren();
@@ -3221,31 +3631,68 @@ const App = {
     if (els.importFolderInput) els.importFolderInput.accept = accept;
   },
 
-  async renderPluginList() {
+  renderShortcutList() {
+    const wrap = els.shortcutList;
+    if (!wrap) return;
+    const bindings = Shortcuts.loadBindings();
+    wrap.replaceChildren();
+    const groups = [
+      { label: 'Dashboard', actions: Shortcuts._actions.filter(a => a.scope === 'dashboard') },
+      { label: 'Workspace', actions: Shortcuts._actions.filter(a => a.scope === 'workspace') },
+      { label: 'Plugin', actions: Shortcuts._pluginActions }
+    ];
+    for (const g of groups) {
+      if (!g.actions.length) continue;
+      const head = document.createElement('div');
+      head.className = 'shortcut-group';
+      head.textContent = g.label;
+      wrap.appendChild(head);
+      for (const a of g.actions) wrap.appendChild(App.buildShortcutRow(a, bindings));
+    }
+  },
+
+  buildShortcutRow(action, bindings) {
+    const row = document.createElement('div');
+    row.className = 'shortcut-row';
+    const label = document.createElement('span');
+    label.className = 'shortcut-label';
+    label.textContent = action.label;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'shortcut-key';
+    const cur = action.id in bindings ? bindings[action.id] : (action.def || '');
+    btn.innerHTML = cur ? comboHtml(cur) : '<span class="shortcut-none">Tidak diatur</span>';
+    btn.title = 'Klik lalu tekan kombinasi tombol (Backspace menghapus, Escape batal)';
+    btn.addEventListener('click', () => Shortcuts.startRecording(action, btn));
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'shortcut-reset';
+    reset.title = 'Reset ke default';
+    reset.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/></svg>';
+    const isCustom = (action.id in bindings) && bindings[action.id] !== (action.def || '');
+    reset.hidden = !isCustom;
+    reset.addEventListener('click', () => {
+      const b = Shortcuts.loadBindings();
+      delete b[action.id];
+      Shortcuts.saveBindings(b);
+      Shortcuts.rebuild();
+      App.renderShortcutList();
+    });
+    row.append(label, btn, reset);
+    return row;
+  },
+
+  openPluginManager() {
+    toggleModal(els.pluginManagerModal, true);
+    App.renderPluginList();
+  },
+
+  renderPluginList() {
     const container = els.pluginList;
     if (!container) return;
-    try {
-      const plugins = await PluginManager.list();
-      App.syncImportAccept(plugins);
-      App.renderPluginCards(container, plugins, { uninstall: true });
-    } catch (e) {
-      container.innerHTML = `<p class="hint" style="color:var(--danger);">Gagal memuat daftar plugin: ${escapeHtml(e.message)}</p>`;
-    }
-  },
-
-  async renderProjectPluginList() {
-    const container = els.projectPluginList;
-    if (!container) return;
-    try {
-      const plugins = await PluginManager.list();
-      App.renderPluginCards(container, plugins, { settings: true });
-    } catch (e) {
-      container.innerHTML = `<p class="hint" style="color:var(--danger);">Gagal memuat daftar plugin: ${escapeHtml(e.message)}</p>`;
-    }
-  },
-
-  renderPluginCards(container, plugins, opts = {}) {
-    if (!container) return;
+    const plugins = PluginRuntime.listMeta();
+    App.syncImportAccept(plugins);
+    container.replaceChildren();
     if (!plugins.length) {
       container.innerHTML = `
           <div class="plugin-empty">
@@ -3254,82 +3701,68 @@ const App = {
           </div>`;
       return;
     }
-    container.innerHTML = '';
-    for (const p of plugins) {
-      const row = document.createElement('div');
-      row.className = 'plugin-row';
-      const exts = (p.extensions || []).map(e => escapeHtml(e)).join(' ');
-      const strategies = Array.isArray(p.matchStrategy) ? p.matchStrategy : [p.matchStrategy];
-      const stratLabel = strategies.map(s => {
-        if (s === 'extension') return 'ext';
-        if (s === 'magic') return 'magic';
-        if (s === 'filename') return 'filename';
-        if (s === 'any') return 'any';
-        return s;
-      }).join('+');
-      const stratParts = [];
-      if (strategies.includes('extension')) stratParts.push(`ext: ${exts || '-'}`);
-      if (strategies.includes('magic') && Array.isArray(p.magic) && p.magic.length) {
-        stratParts.push(`magic: ${p.magic.map(m => `@${m.offset}:${m.hex.slice(0, 12)}${m.hex.length > 12 ? '…' : ''}`).join(', ')}`);
-      }
-      if (strategies.includes('filename') && p.filenameRegex) stratParts.push(`regex: ${escapeHtml(p.filenameRegex)}`);
-      if (strategies.includes('any')) stratParts.push('any file');
-      const stratTitle = stratParts.join(' | ');
-      const badges = [];
-      badges.push('<span class="plugin-badge plugin-badge-worker" title="Berjalan di Web Worker">Worker</span>');
-      if (p.wasm) badges.push('<span class="plugin-badge plugin-badge-wasm" title="Memakai WebAssembly">WASM</span>');
-      if (Array.isArray(p.settings) && p.settings.length) badges.push('<span class="plugin-badge plugin-badge-settings" title="Punya pengaturan">Settings</span>');
-      badges.push(`<span class="plugin-badge plugin-badge-match" title="${escapeHtml(stratTitle)}">${escapeHtml(stratLabel)}</span>`);
-      const hasSettings = Array.isArray(p.settings) && p.settings.length > 0;
-      const actions = [];
-      if (opts.settings) {
-        actions.push(`
-          <button class="btn btn-ghost btn-xs btn-plugin-settings" title="Atur plugin ini"${hasSettings ? '' : ' disabled'}>
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            Atur
-          </button>`);
-      }
-      if (opts.uninstall) {
-        actions.push(`
-          <button class="btn btn-ghost btn-xs btn-uninstall-plugin" title="Hapus plugin dan project terkait">
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.4 14.1A2 2 0 0 1 15.6 22H8.4a2 2 0 0 1-2-1.9L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
-            Hapus
-          </button>`);
-      }
-      row.innerHTML = `
-        <div class="plugin-head">
-          <div class="plugin-head-main">
-            <span class="plugin-name">${escapeHtml(p.name)}</span>
-            <span class="plugin-version">v${escapeHtml(p.version)}</span>
-          </div>
-          ${exts ? `<span class="plugin-exts" title="${escapeHtml(stratTitle)}">${exts}</span>` : ''}
-        </div>
-        ${badges.length ? `<div class="plugin-badges">${badges.join('')}</div>` : ''}
-        ${(p.author || (Array.isArray(p.assets) && p.assets.length)) ? `
-        <div class="plugin-meta">
-          ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
-          ${Array.isArray(p.assets) && p.assets.length ? `<span class="plugin-assets" title="${escapeHtml(p.assets.join('\n'))}">${p.assets.length} asset</span>` : ''}
-        </div>` : ''}
-        ${p.description ? `<div class="plugin-desc">${escapeHtml(p.description)}</div>` : ''}
-        ${actions.length ? `<div class="plugin-actions">${actions.join('')}</div>` : ''}
-      `;
-      const uninstallBtn = row.querySelector('.btn-uninstall-plugin');
-      if (uninstallBtn) uninstallBtn.addEventListener('click', async () => {
-        try {
-          const ok = await PluginManager.uninstall(p.id);
-          if (ok) {
-            await App.renderPluginList();
-            await App.loadDashboard();
-            App.flash(`Plugin "${p.name}" dan project terkait dihapus.`);
-          }
-        } catch (e) {
-          alert('Gagal menghapus plugin: ' + e.message);
-        }
-      });
-      const settingsBtn = row.querySelector('.btn-plugin-settings');
-      if (settingsBtn) settingsBtn.addEventListener('click', () => App.openPluginSettings(p));
-      container.appendChild(row);
+    const frag = document.createDocumentFragment();
+    for (const p of plugins) frag.appendChild(App.buildPluginCard(p));
+    container.appendChild(frag);
+  },
+
+  buildPluginCard(p) {
+    const row = document.createElement('div');
+    row.className = 'plugin-row' + (p.enabled ? ' is-enabled' : '');
+    const caps = Array.isArray(p.caps) ? p.caps : [];
+    const badges = [];
+    if (caps.includes('parser') && (p.extensions || []).length) {
+      badges.push(`<span class="plugin-badge plugin-badge-parser" title="Menangani import/export format khusus">Parser ${escapeHtml(p.extensions.join(' '))}</span>`);
     }
+    if (caps.includes('theme')) badges.push('<span class="plugin-badge plugin-badge-theme" title="Mengubah tampilan CSTL">Theme</span>');
+    if (caps.includes('hooks')) badges.push('<span class="plugin-badge plugin-badge-hooks" title="Mengubah alur copy/paste">Hooks</span>');
+    if (caps.includes('commands')) badges.push('<span class="plugin-badge plugin-badge-commands" title="Menyediakan aksi yang bisa di-bind ke shortcut">Commands</span>');
+    if (caps.includes('settings')) badges.push('<span class="plugin-badge plugin-badge-settings" title="Punya pengaturan">Settings</span>');
+    if (p.files.length) {
+      badges.push(`<span class="plugin-badge plugin-badge-package" title="${escapeHtml(p.files.join('\n'))}">Assets · ${p.files.length}</span>`);
+    }
+    row.innerHTML = `
+      <div class="plugin-head">
+        <div class="plugin-head-main">
+          <span class="plugin-name">${escapeHtml(p.name)}</span>
+          <span class="plugin-version">v${escapeHtml(p.version)}</span>
+        </div>
+        <label class="switch" title="${p.enabled ? 'Nonaktifkan' : 'Aktifkan'} plugin">
+          <input type="checkbox" class="plugin-toggle" ${p.enabled ? 'checked' : ''} />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+      ${badges.length ? `<div class="plugin-badges">${badges.join('')}</div>` : ''}
+      ${p.author || p.description ? `
+      <div class="plugin-meta">
+        ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
+        ${p.description ? `<span class="plugin-desc-inline">${escapeHtml(p.description)}</span>` : ''}
+      </div>` : ''}
+      <div class="plugin-actions">
+        <button class="btn btn-ghost btn-xs btn-uninstall-plugin" title="Hapus plugin">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.4 14.1A2 2 0 0 1 15.6 22H8.4a2 2 0 0 1-2-1.9L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
+          Hapus
+        </button>
+      </div>
+    `;
+    row.querySelector('.plugin-toggle').addEventListener('change', async e => {
+      await PluginRuntime.setEnabled(p.id, e.target.checked);
+      App.renderPluginList();
+    });
+    row.querySelector('.btn-uninstall-plugin').addEventListener('click', async () => {
+      try {
+        const ok = await PluginRuntime.uninstall(p.id);
+        if (ok) {
+          App.renderPluginList();
+          await App.loadDashboard();
+          if (els.shortcutModal.classList.contains('open')) App.renderShortcutList();
+          App.flash(`Plugin "${p.name}" dihapus.`);
+        }
+      } catch (e) {
+        alert('Gagal menghapus plugin: ' + e.message);
+      }
+    });
+    return row;
   },
 
   openPluginSettings(pluginMeta) {
@@ -3337,8 +3770,7 @@ const App = {
       alert('Plugin ini tidak memiliki pengaturan.');
       return;
     }
-    const userSettings = State.pluginSettingsFor(pluginMeta.id);
-    const merged = PluginManager.applyDefaults(pluginMeta, userSettings);
+    const merged = PluginRuntime.valuesFor(pluginMeta);
     const form = document.createElement('div');
     form.className = 'plugin-settings-form';
     for (const s of pluginMeta.settings) {
@@ -3346,25 +3778,19 @@ const App = {
       row.className = 'plugin-settings-row';
       const id = `pluginSetting_${pluginMeta.id}_${s.key}`;
       const cur = merged[s.key];
-      const type = (s.type || 'string').toLowerCase();
+      const type = s.type;
       let inputHtml;
       if (type === 'boolean') {
-        inputHtml = `<label class="check-line"><input id="${id}" type="checkbox" ${cur ? 'checked' : ''}/> ${escapeHtml(s.description || '')}</label>`;
+        inputHtml = `<label class="check-line"><input id="${id}" type="checkbox" ${cur ? 'checked' : ''}/> ${escapeHtml(s.label)}</label>`;
       } else if (type === 'select') {
-        const opts = (s.options || []).map(o => {
-          const v = typeof o === 'object' ? o.value : o;
-          const l = typeof o === 'object' ? o.label : o;
-          return `<option value="${escapeHtml(String(v))}" ${String(cur) === String(v) ? 'selected' : ''}>${escapeHtml(String(l))}</option>`;
-        }).join('');
+        const opts = (s.options || []).map(o => `<option value="${escapeHtml(o.value)}" ${String(cur) === o.value ? 'selected' : ''}>${escapeHtml(o.label)}</option>`).join('');
         inputHtml = `<select id="${id}" class="input w-full">${opts}</select>`;
       } else if (type === 'textarea') {
-        inputHtml = `<textarea id="${id}" class="textarea w-full" rows="4">${escapeHtml(String(cur ?? ''))}</textarea>`;
+        inputHtml = `<textarea id="${id}" class="textarea w-full" rows="4" placeholder="${escapeHtml(s.placeholder || '')}">${escapeHtml(String(cur ?? ''))}</textarea>`;
       } else if (type === 'number') {
         inputHtml = `<input id="${id}" class="input w-full" type="number" value="${escapeHtml(String(cur ?? ''))}" ${s.min != null ? `min="${s.min}"` : ''} ${s.max != null ? `max="${s.max}"` : ''} ${s.step != null ? `step="${s.step}"` : ''}/>`;
-      } else if (type === 'color') {
-        inputHtml = `<input id="${id}" class="input" type="color" value="${escapeHtml(String(cur ?? '#000000'))}"/>`;
       } else {
-        inputHtml = `<input id="${id}" class="input w-full" type="text" value="${escapeHtml(String(cur ?? ''))}" ${s.placeholder ? `placeholder="${escapeHtml(s.placeholder)}"` : ''}/>`;
+        inputHtml = `<input id="${id}" class="input w-full" type="text" value="${escapeHtml(String(cur ?? ''))}" placeholder="${escapeHtml(s.placeholder || '')}"/>`;
       }
       const labelHtml = type === 'boolean' ? '' : `<label for="${id}" class="plugin-settings-label">${escapeHtml(s.label)}${s.description ? `<span class="plugin-settings-desc">${escapeHtml(s.description)}</span>` : ''}</label>`;
       row.innerHTML = `<div class="plugin-settings-cell">${labelHtml}${inputHtml}</div>`;
@@ -3384,7 +3810,11 @@ const App = {
           <button class="btn btn-primary btn-plugin-settings-save">Simpan</button>
         </div>
       </div>`;
-    overlay.querySelector('.modal-body').appendChild(form);
+    const body = overlay.querySelector('.modal-body');
+    const scopeHint = document.createElement('p');
+    scopeHint.className = 'hint m-0 mt-1 mb-2';
+    scopeHint.textContent = `Nilai hanya berlaku untuk project "${State.projectName || 'ini'}"; project lain memakai nilai default.`;
+    body.append(scopeHint, form);
     document.body.appendChild(overlay);
 
     requestAnimationFrame(() => overlay.classList.add('open'));
@@ -3393,30 +3823,26 @@ const App = {
       setTimeout(() => overlay.remove(), MODAL_CLOSE_MS);
     };
     overlay.querySelector('.btn-plugin-settings-cancel').addEventListener('click', close);
-    overlay.querySelector('.btn-plugin-settings-save').addEventListener('click', () => {
+    overlay.querySelector('.btn-plugin-settings-save').addEventListener('click', async () => {
       const out = {};
       for (const s of pluginMeta.settings) {
-        const id = `pluginSetting_${pluginMeta.id}_${s.key}`;
-        const el = document.getElementById(id);
+        const el = document.getElementById(`pluginSetting_${pluginMeta.id}_${s.key}`);
         if (!el) continue;
-        const type = (s.type || 'string').toLowerCase();
-        let v;
-        if (type === 'boolean') v = !!el.checked;
-        else if (type === 'number') v = el.value === '' ? null : Number(el.value);
-        else v = el.value;
-        out[s.key] = v;
+        if (s.type === 'boolean') out[s.key] = !!el.checked;
+        else if (s.type === 'number') out[s.key] = el.value === '' ? null : Number(el.value);
+        else out[s.key] = el.value;
       }
-      State.setPluginSettings(pluginMeta.id, out);
-      State.queueSave();
+      await PluginRuntime.setValues(pluginMeta.id, out);
       close();
+      App.renderPluginList();
       App.flash(`Pengaturan plugin "${pluginMeta.name}" untuk project ini disimpan.`);
     });
-    overlay.querySelector('.btn-plugin-settings-reset').addEventListener('click', () => {
-      if (!confirm('Reset pengaturan plugin ke nilai default?')) return;
-      State.clearPluginSettings(pluginMeta.id);
-      State.queueSave();
+    overlay.querySelector('.btn-plugin-settings-reset').addEventListener('click', async () => {
+      if (!confirm('Reset pengaturan plugin di project ini ke nilai default?')) return;
+      PluginRuntime.setValues(pluginMeta.id, {});
       close();
-      App.openPluginSettings(pluginMeta);
+      App.renderPluginList();
+      App.openPluginSettings(PluginRuntime.getMeta(pluginMeta.id) || pluginMeta);
     });
 
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
@@ -3425,11 +3851,12 @@ const App = {
   async installPlugin(file) {
     await withProgress('Memasang plugin...', 'Membaca file...', async () => {
       try {
-        const meta = await PluginManager.install(file);
+        const meta = await PluginRuntime.install(file);
         if (!meta) { Progress.hide(); return; }
         Progress.update('Memuat ulang daftar plugin...', 100);
-        await App.renderPluginList();
-        App.flash(`Plugin "${meta.name}" v${meta.version} terpasang.`);
+        App.renderPluginList();
+        if (els.shortcutModal.classList.contains('open')) App.renderShortcutList();
+        App.flash(`Plugin "${meta.name}" v${meta.version} ${meta.enabled ? 'aktif' : 'terpasang (nonaktif)'}.`);
       } catch (e) {
         Progress.hide();
         setTimeout(() => alert('Gagal memasang plugin: ' + e.message), 10);
@@ -3626,7 +4053,10 @@ const App = {
         badge = '<span class="badge badge-json">JSON-VNTP</span>';
         typeClass = 'is-json';
       } else if (p.projectType === 'plugin') {
-        badge = '<span class="badge badge-plugin">PLUGIN</span>';
+        const pluginMissing = p.pluginId && !PluginRuntime.getMeta(p.pluginId);
+        badge = pluginMissing
+          ? `<span class="badge badge-plugin is-missing" title="Plugin ${escapeHtml(p.pluginName || p.pluginId)} tidak terpasang">BUTUH PLUGIN</span>`
+          : '<span class="badge badge-plugin">PLUGIN</span>';
         typeClass = 'is-plugin';
       }
     }
@@ -3690,6 +4120,10 @@ const App = {
     card.querySelector('.btn-open').addEventListener('click', async () => {
       try {
         const data = await Storage.load(p.id);
+        if (data.projectType === 'plugin' && data.pluginId && !PluginRuntime.getMeta(data.pluginId)) {
+          alert(`Project ini butuh plugin "${data.pluginName || data.pluginId}" agar bisa dibuka.\nPasang dulu plugin tersebut lewat Pengaturan → Buka Plugin Manager, lalu buka project ini lagi.`);
+          return;
+        }
         App.open(p.id, data);
       } catch (e) { alert('Gagal membuka project: ' + e.message); }
     });
@@ -3741,14 +4175,10 @@ const App = {
       const r = await parseRestore(await uploadedFile.arrayBuffer(), uploadedFile.name.replace(/\.cstl$/i, ''), Progress.update);
       await App.loadDashboard();
       return r;
-    }, e => e.pluginMissing ? e.message : 'File korup: ' + e.message);
+    }, e => 'File korup: ' + e.message);
     if (result) {
       if (result.single) alert(`Project "${result.name}" dipulihkan!`);
-      else {
-        let msg = `${result.ok} project berhasil dipulihkan${result.fail ? `, ${result.fail} gagal` : ''}.`;
-        if (result.missing?.length) msg += `\nPlugin tidak terpasang: ${result.missing.join(', ')}.`;
-        alert(msg);
-      }
+      else alert(`${result.ok} project berhasil dipulihkan${result.fail ? `, ${result.fail} gagal` : ''}.`);
     }
     e.target.value = '';
   },
@@ -4121,11 +4551,12 @@ const App = {
       if (State.ringkasanPrompt && State.ringkasanPrompt.trim()) parts.push(State.ringkasanPrompt.trim());
     }
     parts.push(sel.map(App.formatLine).join('\n'));
-    const text = parts.join('\n\n');
+    const text = PluginRuntime.runCopyHook(parts.join('\n\n'));
 
     try {
       await clipboard(text);
       App.flash(`Disalin ${sel.length} baris.`);
+      PluginRuntime.emit('copy', { count: sel.length, lines: sel.map(l => l.line_num) });
     } catch {
       els.pasteArea.value = text;
       alert("Clipboard diblokir. Teks dipindah ke kolom 'Paste hasil AI'.");
@@ -4179,7 +4610,7 @@ const App = {
 
   applyTranslation() {
     if (!State.lines.length) return;
-    const raw = els.pasteArea.value.trim();
+    const raw = PluginRuntime.runApplyHook(els.pasteArea.value.trim());
     if (!raw) return alert('Teks kosong.');
 
     const { results, errors, seen, ringkasan } = App.parseAi(raw, State.byNum);
@@ -4223,7 +4654,47 @@ const App = {
     State.namesDirty = true;
     App.refresh(true);
     State.queueSave();
-    App.flash(`${updates.length} baris sukses diterapkan.`);
+    const nums = updates.map(u => u.line.line_num);
+    const incMsg = App.applyIncrement(nums);
+    App.flash(`${updates.length} baris sukses diterapkan.${incMsg || ''}`);
+    PluginRuntime.emit('apply', { count: updates.length, lines: nums });
+  },
+
+  prefillIncrement() {
+    const step = Math.max(1, Math.floor(Number(State.incrementStep) || 100));
+    const max = State.lines.reduce((m, l) => Math.max(m, l.line_num), 0);
+    if (!max) return;
+    els.rangeFromInput.value = 1;
+    els.rangeToInput.value = Math.min(step, max);
+    App.selectRange();
+  },
+
+  applyIncrement(applied) {
+    if (!State.incrementEnabled || !State.lines.length) return null;
+    const step = Math.max(1, Math.floor(Number(State.incrementStep) || 100));
+    const max = State.lines.reduce((m, l) => Math.max(m, l.line_num), 0);
+    const pf = parseInt(els.rangeFromInput.value, 10);
+    const pt = parseInt(els.rangeToInput.value, 10);
+    const hasRange = Number.isFinite(pf) && Number.isFinite(pt) && pf >= 1 && pt >= pf;
+    const base = hasRange ? pt : (applied.length ? Math.max(...applied) : 0);
+    const from = base + 1;
+    if (from > max) {
+      els.rangeFromInput.value = '';
+      els.rangeToInput.value = '';
+      return ' Semua baris sudah tercakup.';
+    }
+    const to = Math.min(from + step - 1, max);
+    els.rangeFromInput.value = from;
+    els.rangeToInput.value = to;
+    State.selected.clear();
+    for (let n = from; n <= to; n++) {
+      const l = State.byNum.get(n);
+      if (l && !isTrans(l)) State.selected.add(n);
+    }
+    App.syncCheckboxes();
+    const idx = State.rows.findIndex(r => r.type === 'line' && r.line.line_num === from);
+    if (idx !== -1) { App.main.scrollToIndex(idx); App.flashRow(from, 60); }
+    return ` Rentang berikutnya ${from}-${to} dipilih.`;
   },
 
   undo() {
