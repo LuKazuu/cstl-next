@@ -913,6 +913,7 @@ const PluginManager = {
     return {
       _viaWorker: true,
       _id: id,
+      _entry: entry,
       extract: async (input) => {
         const { fileName, buffer, options } = input;
         return await PluginManager._rpc(entry.worker, { type: 'call', method: 'extract', args: { fileName, buffer, options } });
@@ -920,6 +921,10 @@ const PluginManager = {
       pack: async (input) => {
         const { lines, sourceMap, projectName, options } = input;
         return await PluginManager._rpc(entry.worker, { type: 'call', method: 'pack', args: { lines, sourceMap, projectName, options } });
+      },
+      reset: async () => {
+        try { return await PluginManager._rpc(entry.worker, { type: 'call', method: 'reset', args: {} }); }
+        catch { return { ok: false }; }
       }
     };
   },
@@ -3120,6 +3125,7 @@ const App = {
     State.initNewProject();
     State.projectId = id;
     State.projectName = name;
+    try { await PluginManager.terminateAllWorkers(); } catch {}
     try {
       await Storage.saveProject(id, State.toData());
       App.open(id, State.toData());

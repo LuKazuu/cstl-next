@@ -217,6 +217,10 @@
       const a = Array.isArray(args) ? args[0] : args;
       const input = { ...a, host: buildHostApi() };
 
+      if (typeof pluginInstance.reset === 'function') {
+        try { pluginInstance.reset(); } catch {}
+      }
+
       const emit = makeProgressEmit();
       input.host.progressHook = (cb) => {
 
@@ -230,6 +234,14 @@
         progressHook.cb = wrapped;
       };
       return await pluginInstance[method](input);
+    }
+
+    if (method === 'reset') {
+      if (typeof pluginInstance.reset === 'function') {
+        pluginInstance.reset();
+        return { ok: true };
+      }
+      return { ok: false, note: 'Plugin tidak mengekspor reset()' };
     }
 
     if (typeof pluginInstance[method] === 'function') {
