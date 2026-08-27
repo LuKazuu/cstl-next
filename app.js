@@ -192,9 +192,11 @@ const Storage = {
     const w = await tmpHandle.createWritable();
     await w.write(content);
     await w.close();
+    let moved = false;
     if (typeof tmpHandle.move === 'function') {
-      await tmpHandle.move(name);
-    } else {
+      try { await tmpHandle.move(name); moved = true; } catch {}
+    }
+    if (!moved) {
       const finalHandle = await root.getFileHandle(name, { create: true });
       const w2 = await finalHandle.createWritable();
       await w2.write(content);
@@ -3597,6 +3599,8 @@ const App = {
     State.selected.clear();
     State.undo = State.redo = null;
     State.namesDirty = true;
+    els.rangeFromInput.value = '';
+    els.rangeToInput.value = '';
 
     if (data.projectType === 'epub' && data.epubSourceId) EpubImages.preload(data.epubSourceId);
 
@@ -3650,6 +3654,8 @@ const App = {
     App.pr?.setItems([], false);
     els.nameTableBody.replaceChildren();
     els.pasteArea.value = '';
+    els.rangeFromInput.value = '';
+    els.rangeToInput.value = '';
     els.copyStatus.classList.add('empty');
     els.progressText.textContent = '0/0 (0%)';
     els.progressText.classList.remove('saved');
