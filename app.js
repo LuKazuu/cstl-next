@@ -3645,8 +3645,6 @@ const App = {
         const to = parseInt(els.rangeToInput.value, 10);
         const hasRange = from >= 1 && to >= from;
         const justEnabled = !prevIncrementEnabled && State.incrementEnabled;
-        // Prefill on first activation (or when the range inputs are empty) so the
-        // next batch always continues after the last translated line.
         if (!hasRange || justEnabled) App.prefillIncrement();
       }
       State.queueSave();
@@ -5090,8 +5088,6 @@ const App = {
     const step = Math.max(1, Math.floor(Number(State.incrementStep) || 100));
     const max = State.lines.reduce((m, l) => Math.max(m, l.line_num), 0);
     if (!max) return;
-    // Resume after the furthest translated line (high-water mark), never from row 1,
-    // so already-translated batches are not re-selected.
     const from = App.nextUntranslatedAfter(App.lastTranslatedNum());
     if (from === null) {
       els.rangeFromInput.value = '';
@@ -5112,8 +5108,6 @@ const App = {
     const pf = parseInt(els.rangeFromInput.value, 10);
     const pt = parseInt(els.rangeToInput.value, 10);
     const hasRange = Number.isFinite(pf) && Number.isFinite(pt) && pf >= 1 && pt >= pf;
-    // Advance from the furthest point that was actually translated: the highest
-    // line just applied, or the end of the prepared range if it lies further.
     let base = 0;
     if (applied.length) base = Math.max(...applied);
     if (hasRange && pt > base) base = pt;
