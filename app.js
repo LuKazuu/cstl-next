@@ -11,7 +11,6 @@ const SHORTCUT_STORAGE_KEY = 'cstl.shortcuts.v1';
 const DEFAULT_PROMPT = `Translate entire text to Native English. Euphemism prohibited. Onomatopoeia must be English-based. Result must be inside codeblock. Keep line numbering and format (like code in the middle of the text) intact.`;
 const DEFAULT_RINGKASAN_PROMPT = `Outside the <translate> and </translate> tags (placed above or below the translated lines), include updated summary of the characters and overall story so far. Any characters and story need to be preserved even though they don't appear again for context.`;
 const FIXED_FORMAT_PROMPT = `Format:\n<translate>\ntext\n</translate>`;
-const MODAL_CLOSE_MS = 180;
 const TOAST_TIMEOUT_MS = 3000;
 const SAVED_TIMEOUT_MS = 1800;
 const DASHBOARD_PAGE_SIZE = 30;
@@ -2904,12 +2903,7 @@ function closeDropdowns() {
 }
 
 function toggleModal(el, show) {
-  if (show) { el.classList.remove('closing'); el.classList.add('open'); }
-  else {
-    el.classList.add('closing');
-    el.classList.remove('open');
-    setTimeout(() => el.classList.remove('closing'), MODAL_CLOSE_MS);
-  }
+  el.classList.toggle('open', !!show);
 }
 
 function anyModalOpen() {
@@ -3179,19 +3173,9 @@ const App = {
     if (!keep) setTimeout(() => { if (App.toastToken === t) el.classList.add('empty'); }, TOAST_TIMEOUT_MS);
   },
 
-  flashRow(n, delay = 50) {
-    setTimeout(() => {
-      const cb = els.previewContainer.querySelector(`input[data-num="${n}"]`);
-      const row = cb?.closest('.preview-row');
-      if (row) { row.classList.add('row-flash'); setTimeout(() => row.classList.remove('row-flash'), 800); }
-    }, delay);
-  },
-
   flashSaved() {
     const bar = els.progressText;
     if (!bar || !State.projectId) return;
-    bar.classList.remove('saved');
-    void bar.offsetWidth;
     bar.classList.add('saved');
     clearTimeout(App.savedTimer);
     App.savedTimer = setTimeout(() => bar.classList.remove('saved'), SAVED_TIMEOUT_MS);
@@ -3648,6 +3632,7 @@ const App = {
     });
     els.btnSettingsCancel.addEventListener('click', () => toggleModal(els.settingsModal, false));
     els.btnSettingsSave.addEventListener('click', () => {
+      const prevIncrementEnabled = State.incrementEnabled;
       SETTINGS_FIELDS.forEach(({ id, key, type, def }) => {
         if (type === 'check') State[key] = els[id].checked;
         else if (type === 'number') State[key] = Math.max(1, Math.floor(Number(els[id].value) || def));
@@ -3658,7 +3643,11 @@ const App = {
       if (State.incrementEnabled && State.projectId && State.lines.length) {
         const from = parseInt(els.rangeFromInput.value, 10);
         const to = parseInt(els.rangeToInput.value, 10);
-        if (!(from >= 1 && to >= from)) App.prefillIncrement();
+        const hasRange = from >= 1 && to >= from;
+        const justEnabled = !prevIncrementEnabled && State.incrementEnabled;
+        // Prefill on first activation (or when the range inputs are empty) so the
+        // next batch always continues after the last translated line.
+        if (!hasRange || justEnabled) App.prefillIncrement();
       }
       State.queueSave();
     });
@@ -3767,7 +3756,7 @@ const App = {
       if (State.jumpToContext) {
         toggleModal(els.proofreadModal, false);
         const idx = State.rows.findIndex(r => r.type === 'line' && r.line.line_num === n);
-        if (idx !== -1) { App.main.scrollToIndex(idx); App.flashRow(n, 60); }
+        if (idx !== -1) { App.main.scrollToIndex(idx); }
       } else {
         App.openLineEditor(n);
       }
@@ -3916,7 +3905,6 @@ const App = {
     const idx = State.rows.findIndex(r => r.type === 'line' && r.line.line_num === num);
     if (idx === -1) return;
     App.main.scrollToIndex(idx);
-    App.flashRow(num, 60);
   },
 
   syncSettingsModal() {
@@ -4020,7 +4008,7 @@ const App = {
     els.stickyFileName.textContent = '';
     els.stickyFileName.title = '';
     els.stickyFileRange.textContent = '';
-    els.stickyFileBar.classList.remove('show', 'swap');
+    els.stickyFileBar.classList.remove('show');
     els.stickyFileCheckbox.checked = false;
     els.stickyFileCheckbox.disabled = true;
     delete els.stickyFileCheckbox.dataset.file;
@@ -4249,10 +4237,10 @@ const App = {
     body.append(scopeHint, form);
     document.body.appendChild(overlay);
 
-    requestAnimationFrame(() => overlay.classList.add('open'));
+    overlay.classList.add('open');
     const close = () => {
       overlay.classList.remove('open');
-      setTimeout(() => overlay.remove(), MODAL_CLOSE_MS);
+      overlay.remove();
     };
     overlay.querySelector('.btn-plugin-settings-cancel').addEventListener('click', close);
     overlay.querySelector('.btn-plugin-settings-save').addEventListener('click', async () => {
@@ -4689,16 +4677,8 @@ const App = {
 
     if (activeFile !== App.lastFile) {
       if (activeFile) {
-        if (App.lastFile !== null) {
-          bar.classList.add('swap');
-          setTimeout(() => {
-            App._applyFileBadgeContent(activeFile, nameEl, rangeEl, cb);
-            bar.classList.remove('swap');
-          }, 100);
-        } else {
-          App._applyFileBadgeContent(activeFile, nameEl, rangeEl, cb);
-          bar.classList.add('show');
-        }
+        App._applyFileBadgeContent(activeFile, nameEl, rangeEl, cb);
+        bar.classList.add('show');
       } else {
         nameEl.textContent = '';
         rangeEl.textContent = '';
@@ -4950,7 +4930,7 @@ const App = {
     App.syncCheckboxes();
 
     const idx = State.rows.findIndex(r => r.type === 'line' && r.line.line_num === from);
-    if (idx !== -1) { App.main.scrollToIndex(idx); App.flashRow(from, 50); }
+    if (idx !== -1) { App.main.scrollToIndex(idx); }
   },
 
   buildGlossaryMap() {
@@ -5092,12 +5072,36 @@ const App = {
     PluginRuntime.emit('apply', { count: updates.length, lines: nums });
   },
 
+  lastTranslatedNum() {
+    let last = 0;
+    for (const l of State.lines) if (isTrans(l) && l.line_num > last) last = l.line_num;
+    return last;
+  },
+
+  nextUntranslatedAfter(num) {
+    let next = null;
+    for (const l of State.lines) {
+      if (!isTrans(l) && l.line_num > num && (next === null || l.line_num < next)) next = l.line_num;
+    }
+    return next;
+  },
+
   prefillIncrement() {
     const step = Math.max(1, Math.floor(Number(State.incrementStep) || 100));
     const max = State.lines.reduce((m, l) => Math.max(m, l.line_num), 0);
     if (!max) return;
-    els.rangeFromInput.value = 1;
-    els.rangeToInput.value = Math.min(step, max);
+    // Resume after the furthest translated line (high-water mark), never from row 1,
+    // so already-translated batches are not re-selected.
+    const from = App.nextUntranslatedAfter(App.lastTranslatedNum());
+    if (from === null) {
+      els.rangeFromInput.value = '';
+      els.rangeToInput.value = '';
+      State.selected.clear();
+      App.syncCheckboxes();
+      return;
+    }
+    els.rangeFromInput.value = from;
+    els.rangeToInput.value = Math.min(from + step - 1, max);
     App.selectRange();
   },
 
@@ -5108,11 +5112,18 @@ const App = {
     const pf = parseInt(els.rangeFromInput.value, 10);
     const pt = parseInt(els.rangeToInput.value, 10);
     const hasRange = Number.isFinite(pf) && Number.isFinite(pt) && pf >= 1 && pt >= pf;
-    const base = hasRange ? pt : (applied.length ? Math.max(...applied) : 0);
-    const from = base + 1;
-    if (from > max) {
+    // Advance from the furthest point that was actually translated: the highest
+    // line just applied, or the end of the prepared range if it lies further.
+    let base = 0;
+    if (applied.length) base = Math.max(...applied);
+    if (hasRange && pt > base) base = pt;
+    if (!base) base = App.lastTranslatedNum();
+    const from = App.nextUntranslatedAfter(base);
+    if (from === null) {
       els.rangeFromInput.value = '';
       els.rangeToInput.value = '';
+      State.selected.clear();
+      App.syncCheckboxes();
       return ' Semua baris sudah tercakup.';
     }
     const to = Math.min(from + step - 1, max);
@@ -5125,7 +5136,7 @@ const App = {
     }
     App.syncCheckboxes();
     const idx = State.rows.findIndex(r => r.type === 'line' && r.line.line_num === from);
-    if (idx !== -1) { App.main.scrollToIndex(idx); App.flashRow(from, 60); }
+    if (idx !== -1) { App.main.scrollToIndex(idx); }
     return ` Rentang berikutnya ${from}-${to} dipilih.`;
   },
 
