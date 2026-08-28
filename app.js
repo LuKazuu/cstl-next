@@ -6,9 +6,9 @@ const INDEX_FILE = '_index.json';
 const PLUGINS_FILE = '_plugins.json';
 const PLUGIN_PREFIX = 'plugin_';
 const BLOBS_DIR = '_blobs';
-const PLUGIN_API_VERSION = 1;
-const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-const SHORTCUT_STORAGE_KEY = 'cstl.shortcuts.v1';
+const JSZIP_URL = './jszip.min.js';
+const PLUGIN_SETTINGS_FILE = '_plugin_settings.json';
+const SHORTCUTS_FILE = '_shortcuts.json';
 const DEFAULT_PROMPT = `Translate entire text to Native English. Euphemism prohibited. Onomatopoeia must be English-based. Result must be inside codeblock. Keep line numbering and format (like code in the middle of the text) intact.`;
 const DEFAULT_RINGKASAN_PROMPT = `Outside the <translate> and </translate> tags (placed above or below the translated lines), include updated summary of the characters and overall story so far. Any characters and story need to be preserved even though they don't appear again for context.`;
 const FIXED_FORMAT_PROMPT = `Format:\n<translate>\ntext\n</translate>`;
@@ -91,7 +91,7 @@ const themeVarsCss = () => {
 const baseName = p => String(p || '').replace(/\\/g, '/').split('/').pop();
 const fileExt = name => { const bn = baseName(name); const i = bn.lastIndexOf('.'); return i > 0 ? bn.slice(i).toLowerCase() : ''; };
 const readHead = async (file, n = 512) => new Uint8Array(await file.slice(0, n).arrayBuffer());
-const topFileCount = files => (Array.isArray(files) ? files : []).filter(f => !String(f).includes('/')).length;
+const countFiles = files => (Array.isArray(files) ? files : []).length;
 const isTrans = l => !!l.is_translated;
 const makeProjId = () => 'proj_' + Date.now() + '.cstl';
 const makeEpubId = () => 'epub_' + Date.now() + '.epub';
@@ -207,59 +207,157 @@ async function withProgress(title, initialMsg, fn, failMsg) {
   Progress.hide();
   if (err) {
     if (els.copyStatus) els.copyStatus.classList.add('empty');
-    const msg = failMsg ? failMsg(err) : err.message;
+    const msg = err?.storage ? err.message : (failMsg ? failMsg(err) : err.message);
     setTimeout(() => alert(msg), 10);
+    if (err?.storage) App.loadDashboard();
     return undefined;
   }
   return result;
 }
 
+function isStorageError(e) {
+  const n = e?.name;
+  return n === 'NotFoundError' || n === 'SecurityError' || n === 'NotReadableError' ||
+    n === 'InvalidStateError' || n === 'InvalidModificationError' ||
+    n === 'NoModificationAllowedError' || n === 'DataError';
+}
+
+function storageFailure(e, noun) {
+  const n = e?.name;
+  const err = new Error();
+  err.storage = true;
+  if (n === 'NotFoundError') {
+    err.missing = true;
+    err.message = (noun ? 'File ' + noun : 'Data') + ' tidak ditemukan di penyimpanan — mungkin sudah dihapus atau data situs dibersihkan. Daftar akan dimuat ulang.';
+  } else if (n === 'SecurityError') {
+    err.message = 'Browser menolak akses penyimpanan. Tutup lalu buka kembali aplikasi, lalu coba lagi.';
+  } else if (n === 'NoModificationAllowedError') {
+    err.message = 'File sedang dipakai proses lain — tunggu sebentar lalu coba lagi.';
+  } else {
+    err.message = 'Penyimpanan tidak dapat diakses saat ini. Tutup lalu buka kembali aplikasi, lalu coba lagi.';
+  }
+  return err;
+}
+
+function friendlyError(e, prefix) {
+  if (e?.storage) return e.message;
+  if (isStorageError(e)) return storageFailure(e).message;
+  return prefix + (e?.message || e);
+}
+
 const Storage = {
-  root() { return navigator.storage.getDirectory(); },
-  async atomicWrite(root, name, content) {
-    const tmpName = `.${name}.tmp`;
-    const tmpHandle = await root.getFileHandle(tmpName, { create: true });
-    const w = await tmpHandle.createWritable();
-    await w.write(content);
-    await w.close();
-    let moved = false;
-    if (typeof tmpHandle.move === 'function') {
-      try { await tmpHandle.move(name); moved = true; } catch {}
+  _rootPromise: null,
+  root() {
+    if (!this._rootPromise) {
+      this._rootPromise = Promise.resolve().then(() => navigator.storage.getDirectory());
+      this._rootPromise.catch(() => { Storage._rootPromise = null; });
     }
-    if (!moved) {
-      const finalHandle = await root.getFileHandle(name, { create: true });
-      const w2 = await finalHandle.createWritable();
-      await w2.write(content);
-      await w2.close();
-      try { await root.removeEntry(tmpName); } catch {}
-    }
+    return this._rootPromise;
   },
-  async readIndex() {
+  invalidateRoot() {
+    const p = Storage._rootPromise;
+    Storage._rootPromise = null;
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  },
+  async _withRootRetry(fn, noun) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) Storage.invalidateRoot();
+      let root;
+      try { root = await Storage.root(); }
+      catch (e) {
+        lastErr = e;
+        if (!isStorageError(e)) throw e;
+        continue;
+      }
+      try { return await fn(root); }
+      catch (e) {
+        lastErr = e;
+        if (!isStorageError(e)) throw e;
+      }
+    }
+    throw storageFailure(lastErr, noun);
+  },
+  async probe() {
     try {
       const root = await Storage.root();
+      await root.entries().next();
+      return true;
+    } catch {
+      Storage.invalidateRoot();
+      return false;
+    }
+  },
+  _queue: Promise.resolve(),
+  _queued(fn) {
+    const run = Storage._queue.then(fn, fn);
+    Storage._queue = run.then(() => {}, () => {});
+    return run;
+  },
+  async _writeFile(root, name, content) {
+    const rand = Math.random().toString(36).slice(2, 8);
+    const tmpName = '.' + String(name).slice(0, 240) + '.' + rand + '.tmp';
+    let tmpHandle = null;
+    let w = null;
+    try {
+      tmpHandle = await root.getFileHandle(tmpName, { create: true });
+      w = await tmpHandle.createWritable();
+      await w.write(content);
+      await w.close();
+      w = null;
+      let moved = false;
+      if (typeof tmpHandle.move === 'function') {
+        try { await tmpHandle.move(name); moved = true; } catch {}
+      }
+      if (!moved) {
+        const finalHandle = await root.getFileHandle(name, { create: true });
+        const w2 = await finalHandle.createWritable();
+        try {
+          await w2.write(content);
+          await w2.close();
+        } catch (e) {
+          try { await w2.abort(); } catch {}
+          throw e;
+        }
+      }
+      App.ensureSW();
+    } catch (e) {
+      if (w) { try { await w.abort(); } catch {} }
+      if (e && /quota/i.test(String(e.name || e.message || ''))) {
+        throw new Error('Penyimpanan browser penuh saat menyimpan file — bersihkan file yang tidak perlu lalu coba lagi.');
+      }
+      throw e;
+    } finally {
+      if (tmpHandle) { try { await root.removeEntry(tmpName); } catch {} }
+    }
+  },
+  atomicWrite(name, content) {
+    return Storage._queued(() => Storage._withRootRetry(root => Storage._writeFile(root, name, content)));
+  },
+  async _readIndexFrom(root) {
+    try {
       const f = await (await root.getFileHandle(INDEX_FILE)).getFile();
       return JSON.parse(await f.text());
     } catch { return null; }
   },
-  async writeIndex(items) {
-    const root = await Storage.root();
-    await Storage.atomicWrite(root, INDEX_FILE, JSON.stringify(items));
+  readIndex() {
+    return Storage._withRootRetry(root => Storage._readIndexFrom(root));
   },
-  async upsertIndex(meta) {
-    const items = (await Storage.readIndex()) || [];
-    const i = items.findIndex(p => p.id === meta.id);
-    if (i >= 0) items[i] = meta; else items.push(meta);
-    items.sort((a, b) => b.updatedAt - a.updatedAt);
-    await Storage.writeIndex(items);
+  writeIndex(items) {
+    return Storage._queued(() => Storage._withRootRetry(root => Storage._writeFile(root, INDEX_FILE, JSON.stringify(items))));
   },
-  async removeIndex(id) {
-    const items = (await Storage.readIndex()) || [];
-    await Storage.writeIndex(items.filter(p => p.id !== id));
+  upsertIndex(meta) {
+    return Storage._queued(() => Storage._withRootRetry(async root => {
+      const items = (await Storage._readIndexFrom(root)) || [];
+      const i = items.findIndex(p => p.id === meta.id);
+      if (i >= 0) items[i] = meta; else items.push(meta);
+      items.sort((a, b) => b.updatedAt - a.updatedAt);
+      await Storage._writeFile(root, INDEX_FILE, JSON.stringify(items));
+    }));
   },
   async saveProject(id, data, counts) {
     data.updatedAt = Date.now();
-    const root = await Storage.root();
-    await Storage.atomicWrite(root, id, JSON.stringify(data));
+    await Storage.atomicWrite(id, JSON.stringify(data));
     const tc = counts?.translatedCount ?? data.lines?.reduce((n, l) => n + (l.is_translated ? 1 : 0), 0) ?? 0;
     await Storage.upsertIndex({
       id,
@@ -268,22 +366,35 @@ const Storage = {
       pluginId: data.pluginId || null,
       pluginName: data.pluginName || null,
       updatedAt: data.updatedAt,
-      fileCount: counts?.fileCount ?? topFileCount(data.imported_files),
+      fileCount: counts?.fileCount ?? countFiles(data.imported_files),
       lineCount: counts?.lineCount ?? data.lines?.length ?? 0,
       translatedCount: tc
     });
   },
-  async load(id) {
-    const root = await Storage.root();
-    const f = await (await root.getFileHandle(id)).getFile();
+  async _readFileJson(root, name) {
+    const f = await (await root.getFileHandle(name)).getFile();
     return JSON.parse(await f.text());
   },
+  async load(id) {
+    try {
+      return await Storage._withRootRetry(root => Storage._readFileJson(root, id), 'project');
+    } catch (e) {
+      if (e instanceof SyntaxError) throw new Error('File project rusak atau tidak valid — tidak bisa dibuka.');
+      throw e;
+    }
+  },
   async remove(id, epubId) {
-    const root = await Storage.root();
-    if (epubId) { try { await root.removeEntry(epubId); } catch {} }
-    await Storage.removeAllBlobs(id);
-    await root.removeEntry(id);
-    await Storage.removeIndex(id);
+    return Storage._queued(() => Storage._withRootRetry(async root => {
+      if (epubId) {
+        try { await root.removeEntry(epubId); }
+        catch (e) { if (e?.name !== 'NotFoundError') throw e; }
+      }
+      await Storage._removeBlobs(root, id);
+      try { await root.removeEntry(id); }
+      catch (e) { if (e?.name !== 'NotFoundError') throw e; }
+      const items = (await Storage._readIndexFrom(root)) || [];
+      await Storage._writeFile(root, INDEX_FILE, JSON.stringify(items.filter(p => p.id !== id)));
+    }));
   },
   async list() {
     return Storage.reconcileIndex(await Storage.readIndex());
@@ -296,44 +407,46 @@ const Storage = {
       pluginId: data.pluginId || null,
       pluginName: data.pluginName || null,
       updatedAt: data.updatedAt || fallbackModified,
-      fileCount: topFileCount(data.imported_files),
+      fileCount: countFiles(data.imported_files),
       lineCount: data.lines?.length || 0,
       translatedCount: data.lines?.reduce((n, l) => n + (l.is_translated ? 1 : 0), 0) || 0
     };
   },
-  async reconcileIndex(items) {
-    const saved = Array.isArray(items) ? items : [];
-    const root = await Storage.root();
-    const byId = new Map(saved.map(p => [p.id, p]));
-    const found = [];
-    let changed = false;
-    for await (const [name, h] of root.entries()) {
-      if (h.kind !== 'file' || !name.endsWith('.cstl')) continue;
-      const meta = byId.get(name);
-      if (meta) {
-        byId.delete(name);
-        found.push(meta);
-        continue;
+  reconcileIndex(items) {
+    return Storage._queued(() => Storage._withRootRetry(async root => {
+      const saved = Array.isArray(items) ? items : [];
+      const byId = new Map(saved.map(p => [p.id, p]));
+      const found = [];
+      let changed = false;
+      for await (const [name, h] of root.entries()) {
+        if (h.kind !== 'file' || !name.endsWith('.cstl')) continue;
+        const meta = byId.get(name);
+        if (meta) {
+          byId.delete(name);
+          found.push(meta);
+          continue;
+        }
+        try {
+          const f = await h.getFile();
+          found.push(Storage.indexEntry(name, JSON.parse(await f.text()), f.lastModified));
+          changed = true;
+        } catch {}
       }
-      try {
-        const f = await h.getFile();
-        found.push(Storage.indexEntry(name, JSON.parse(await f.text()), f.lastModified));
-        changed = true;
-      } catch {}
-    }
-    if (byId.size) changed = true;
-    found.sort((a, b) => b.updatedAt - a.updatedAt);
-    if (changed) await Storage.writeIndex(found);
-    return found;
+      if (byId.size) changed = true;
+      found.sort((a, b) => b.updatedAt - a.updatedAt);
+      if (changed) await Storage._writeFile(root, INDEX_FILE, JSON.stringify(found));
+      return found;
+    }));
   },
-  async loadEpubBuffer(epubId) {
-    const root = await Storage.root();
-    const f = await (await root.getFileHandle(epubId)).getFile();
+  async _readFileBuffer(root, name) {
+    const f = await (await root.getFileHandle(name)).getFile();
     return await f.arrayBuffer();
   },
+  async loadEpubBuffer(epubId) {
+    return Storage._withRootRetry(root => Storage._readFileBuffer(root, epubId), 'EPUB');
+  },
   async saveEpub(epubId, buffer) {
-    const root = await Storage.root();
-    await Storage.atomicWrite(root, epubId, buffer);
+    await Storage.atomicWrite(epubId, buffer);
   },
   async _blobProjectDir(root, projectId, create) {
     const top = await root.getDirectoryHandle(BLOBS_DIR, { create });
@@ -346,83 +459,80 @@ const Storage = {
     else if (data instanceof ArrayBuffer || data instanceof Uint8Array) blob = new Blob([data], { type: 'application/octet-stream' });
     else if (typeof data === 'string') blob = new Blob([data], { type: 'text/plain' });
     else throw new Error('Data blob tidak valid (harus Blob / ArrayBuffer / Uint8Array / string).');
-    const root = await Storage.root();
-    const projDir = await Storage._blobProjectDir(root, projectId, true);
-    const pluginDir = await projDir.getDirectoryHandle(pluginId, { create: true });
-    await Storage.atomicWrite(pluginDir, key, blob);
+    await Storage._queued(() => Storage._withRootRetry(async root => {
+      const projDir = await Storage._blobProjectDir(root, projectId, true);
+      const pluginDir = await projDir.getDirectoryHandle(pluginId, { create: true });
+      await Storage._writeFile(pluginDir, key, blob);
+    }));
   },
   async loadBlob(projectId, pluginId, key) {
     if (!validBlobKey(key)) return null;
     try {
-      const root = await Storage.root();
-      const projDir = await Storage._blobProjectDir(root, projectId, false);
-      const pluginDir = await projDir.getDirectoryHandle(pluginId);
-      const fh = await pluginDir.getFileHandle(key);
-      return await fh.getFile();
+      return await Storage._withRootRetry(async root => {
+        const projDir = await Storage._blobProjectDir(root, projectId, false);
+        const pluginDir = await projDir.getDirectoryHandle(pluginId);
+        const fh = await pluginDir.getFileHandle(key);
+        return await fh.getFile();
+      });
     } catch { return null; }
   },
   async deleteBlob(projectId, pluginId, key) {
     if (!validBlobKey(key)) return;
-    try {
-      const root = await Storage.root();
-      const projDir = await Storage._blobProjectDir(root, projectId, false);
-      const pluginDir = await projDir.getDirectoryHandle(pluginId);
-      await pluginDir.removeEntry(key);
-    } catch {}
+    await Storage._queued(async () => {
+      try {
+        await Storage._withRootRetry(async root => {
+          const projDir = await Storage._blobProjectDir(root, projectId, false);
+          const pluginDir = await projDir.getDirectoryHandle(pluginId);
+          await pluginDir.removeEntry(key);
+        });
+      } catch {}
+    });
   },
   async listBlobs(projectId, pluginId) {
     try {
-      const root = await Storage.root();
-      const projDir = await Storage._blobProjectDir(root, projectId, false);
-      const pluginDir = await projDir.getDirectoryHandle(pluginId);
-      const keys = [];
-      for await (const [name, h] of pluginDir.entries()) {
-        if (h.kind !== 'file') continue;
-        if (name.startsWith('.') && name.endsWith('.tmp')) continue;
-        keys.push(name);
-      }
-      return keys;
+      return await Storage._withRootRetry(async root => {
+        const projDir = await Storage._blobProjectDir(root, projectId, false);
+        const pluginDir = await projDir.getDirectoryHandle(pluginId);
+        const keys = [];
+        for await (const [name, h] of pluginDir.entries()) {
+          if (h.kind !== 'file') continue;
+          if (name.startsWith('.') && name.endsWith('.tmp')) continue;
+          keys.push(name);
+        }
+        return keys;
+      });
     } catch { return []; }
   },
   async listAllBlobs(projectId) {
     try {
-      const root = await Storage.root();
-      const projDir = await Storage._blobProjectDir(root, projectId, false);
-      const out = [];
-      for await (const [pid, ph] of projDir.entries()) {
-        if (ph.kind !== 'directory') continue;
-        for await (const [name, fh] of ph.entries()) {
-          if (fh.kind !== 'file') continue;
-          if (name.startsWith('.') && name.endsWith('.tmp')) continue;
-          out.push({ pluginId: pid, key: name, handle: fh });
+      return await Storage._withRootRetry(async root => {
+        const projDir = await Storage._blobProjectDir(root, projectId, false);
+        const out = [];
+        for await (const [pid, ph] of projDir.entries()) {
+          if (ph.kind !== 'directory') continue;
+          for await (const [name, fh] of ph.entries()) {
+            if (fh.kind !== 'file') continue;
+            if (name.startsWith('.') && name.endsWith('.tmp')) continue;
+            out.push({ pluginId: pid, key: name, handle: fh });
+          }
         }
-      }
-      return out;
+        return out;
+      });
     } catch { return []; }
   },
   async blobExists(projectId, pluginId, key) {
     if (!validBlobKey(key)) return false;
     try {
-      const root = await Storage.root();
-      const projDir = await Storage._blobProjectDir(root, projectId, false);
-      const pluginDir = await projDir.getDirectoryHandle(pluginId);
-      await pluginDir.getFileHandle(key);
+      await Storage._withRootRetry(async root => {
+        const projDir = await Storage._blobProjectDir(root, projectId, false);
+        const pluginDir = await projDir.getDirectoryHandle(pluginId);
+        await pluginDir.getFileHandle(key);
+      });
       return true;
     } catch { return false; }
   },
-  async removePluginBlobsAll(pluginId) {
+  async _removeBlobs(root, projectId) {
     try {
-      const root = await Storage.root();
-      const top = await root.getDirectoryHandle(BLOBS_DIR);
-      for await (const [projectId, ph] of top.entries()) {
-        if (ph.kind !== 'directory') continue;
-        try { await ph.removeEntry(pluginId, { recursive: true }); } catch {}
-      }
-    } catch {}
-  },
-  async removeAllBlobs(projectId) {
-    try {
-      const root = await Storage.root();
       const top = await root.getDirectoryHandle(BLOBS_DIR);
       await top.removeEntry(projectId, { recursive: true });
     } catch {}
@@ -430,9 +540,10 @@ const Storage = {
   async readPluginIndex() {
     let text;
     try {
-      const root = await Storage.root();
-      const f = await (await root.getFileHandle(PLUGINS_FILE)).getFile();
-      text = await f.text();
+      text = await Storage._withRootRetry(async root => {
+        const f = await (await root.getFileHandle(PLUGINS_FILE)).getFile();
+        return await f.text();
+      });
     } catch { return []; }
     try {
       const parsed = JSON.parse(text);
@@ -440,30 +551,101 @@ const Storage = {
     } catch { return null; }
   },
   async writePluginIndex(items) {
-    const root = await Storage.root();
-    await Storage.atomicWrite(root, PLUGINS_FILE, JSON.stringify(items));
+    await Storage.atomicWrite(PLUGINS_FILE, JSON.stringify(items));
   },
-  async savePluginZip(id, buffer) {
-    const root = await Storage.root();
-    await Storage.removePluginFile(id);
-    await Storage.atomicWrite(root, PLUGIN_PREFIX + id + '.zip', buffer);
+  async readJsonFile(name) {
+    try {
+      return await Storage._withRootRetry(root => Storage._readFileJson(root, name));
+    } catch { return null; }
   },
-  async loadPluginZip(id) {
-    const root = await Storage.root();
-    const f = await (await root.getFileHandle(PLUGIN_PREFIX + id + '.zip')).getFile();
-    return await f.arrayBuffer();
+  writeJsonFile(name, value) {
+    return Storage._queued(() => Storage._withRootRetry(root => Storage._writeFile(root, name, JSON.stringify(value))));
   },
-  async removePluginFile(id) {
-    const root = await Storage.root();
-    for (const ext of ['.js', '.zip']) {
-      try { await root.removeEntry(PLUGIN_PREFIX + id + ext); } catch {}
+  removeFile(name) {
+    return Storage._queued(async () => {
+      try {
+        await Storage._withRootRetry(async root => { await root.removeEntry(name); });
+      } catch {}
+    });
+  },
+  async savePluginZipStream(id, blob) {
+    const name = PLUGIN_PREFIX + id + '.zip';
+    const est = navigator.storage?.estimate ? await navigator.storage.estimate().catch(() => null) : null;
+    if (est && est.quota && blob.size > est.quota - (est.usage || 0)) {
+      const free = est.quota - (est.usage || 0);
+      const mb = n => (n / (1024 * 1024)).toFixed(0) + ' MB';
+      throw new Error(`Penyimpanan browser tidak cukup (sisa ${mb(free)}, paket ${mb(blob.size)}). Bersihkan file yang tidak perlu lalu coba lagi.`);
     }
+    await Storage.atomicWrite(name, blob);
   },
-  async wipe() {
-    const root = await navigator.storage.getDirectory();
-    for await (const [name] of root.entries()) {
-      try { await root.removeEntry(name, { recursive: true }); } catch {}
-    }
+  async pluginZipFile(id) {
+    return Storage._withRootRetry(async root => await (await root.getFileHandle(PLUGIN_PREFIX + id + '.zip')).getFile(), 'paket plugin');
+  },
+  async pluginZipExists(id) {
+    try {
+      await Storage._withRootRetry(async root => { await root.getFileHandle(PLUGIN_PREFIX + id + '.zip'); });
+      return true;
+    } catch { return false; }
+  },
+  async listPluginFiles() {
+    try {
+      return await Storage._withRootRetry(async root => {
+        const out = [];
+        for await (const [name, h] of root.entries()) {
+          if (h.kind !== 'file' || !name.startsWith(PLUGIN_PREFIX) || !name.endsWith('.zip')) continue;
+          out.push({ id: name.slice(PLUGIN_PREFIX.length, -4), name });
+        }
+        return out;
+      });
+    } catch { return []; }
+  },
+  removePluginFile(id) {
+    return Storage._queued(async () => {
+      try {
+        await Storage._withRootRetry(async root => {
+          for (const ext of ['.js', '.zip']) {
+            try { await root.removeEntry(PLUGIN_PREFIX + id + ext); }
+            catch (e) { if (e?.name !== 'NotFoundError') throw e; }
+          }
+        });
+      } catch {}
+    });
+  },
+  async wipe(onProgress) {
+    await Storage._queued(() => Storage._withRootRetry(async root => {
+      const names = [];
+      for await (const [name] of root.entries()) names.push(name);
+      let done = 0;
+      for (const name of names) {
+        try { await root.removeEntry(name, { recursive: true }); } catch {}
+        done++;
+        if (onProgress) { try { onProgress(done, names.length); } catch {} }
+      }
+    }));
+  },
+  async sweepTemp() {
+    const stale = Date.now() - 3600000;
+    const sweepDir = async dir => {
+      const staleNames = [];
+      for await (const [name, h] of dir.entries()) {
+        if (h.kind !== 'file' || !name.startsWith('.') || !name.endsWith('.tmp')) continue;
+        try {
+          const f = await h.getFile();
+          if (f.lastModified < stale) staleNames.push(name);
+        } catch {}
+      }
+      for (const name of staleNames) {
+        try { await dir.removeEntry(name); } catch {}
+      }
+    };
+    const sweepTree = async dir => {
+      await sweepDir(dir);
+      for await (const [name, h] of dir.entries()) {
+        if (h.kind !== 'directory') continue;
+        await sweepTree(h);
+      }
+    };
+    try { await Storage._withRootRetry(root => sweepTree(root)); } catch {}
   }
 };
 
@@ -471,8 +653,8 @@ const OpfsExplorer = {
   path: [],
   classify(name, isDir) {
     if (isDir) return 'folder';
-    if (name === INDEX_FILE) return 'index';
-    if (name === PLUGINS_FILE) return 'plugin';
+    if (name === INDEX_FILE || name === PLUGINS_FILE) return 'index';
+    if (name === PLUGIN_SETTINGS_FILE || name === SHORTCUTS_FILE) return 'data';
     if (name.startsWith(PLUGIN_PREFIX) && (name.endsWith('.js') || name.endsWith('.zip'))) return 'plugin';
     if (name.endsWith('.cstl')) return 'project';
     if (name.startsWith('.') && name.endsWith('.tmp')) return 'tmp';
@@ -486,6 +668,7 @@ const OpfsExplorer = {
       plugin: 'Plugin',
       folder: 'Folder',
       index: 'Index',
+      data: 'Data',
       tmp: 'Tmp',
       other: 'File'
     })[kind] || 'File';
@@ -505,6 +688,9 @@ const OpfsExplorer = {
     }
     if (kind === 'index') {
       return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>';
+    }
+    if (kind === 'data') {
+      return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>';
     }
     if (kind === 'tmp') {
       return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
@@ -633,10 +819,25 @@ const OpfsExplorer = {
     } catch (e) {
       this._showLoading(false);
       els.opfsList.innerHTML = '';
+      if (e?.name === 'NotFoundError') {
+        this.path = [];
+        if (els.opfsCrumbs) els.opfsCrumbs.hidden = true;
+      }
       const notice = document.createElement('div');
-      notice.className = 'opfs-empty';
+      notice.className = 'opfs-error';
       notice.style.color = 'var(--danger)';
-      notice.textContent = 'Gagal memuat: ' + (e?.message || e);
+      const msg = document.createElement('div');
+      msg.textContent = e?.name === 'NotFoundError'
+        ? 'Folder tidak ditemukan — mungkin sudah dihapus. Kembali ke OPFS root.'
+        : friendlyError(e, 'Gagal memuat daftar file: ');
+      notice.appendChild(msg);
+      const retryBtn = document.createElement('button');
+      retryBtn.type = 'button';
+      retryBtn.className = 'btn btn-ghost btn-xs';
+      retryBtn.style.marginTop = '8px';
+      retryBtn.textContent = 'Coba Lagi';
+      retryBtn.addEventListener('click', () => OpfsExplorer.refresh());
+      notice.appendChild(retryBtn);
       els.opfsList.appendChild(notice);
     }
   },
@@ -682,7 +883,7 @@ const OpfsExplorer = {
       const url = URL.createObjectURL(file);
       download(url, name);
     } catch (e) {
-      alert('Gagal mengunduh "' + name + '": ' + (e?.message || e));
+      alert(friendlyError(e, 'Gagal mengunduh "' + name + '": '));
     }
   },
   async remove(name, isDir) {
@@ -708,10 +909,11 @@ const OpfsExplorer = {
       if (els.opfsList && !els.opfsList.children.length) {
         this._showEmpty(true);
       }
-      if (kind === 'plugin' && name !== PLUGINS_FILE) await PluginRuntime.sync();
+      if (kind === 'plugin' && name !== PLUGINS_FILE) await CSTL.plugins.sync();
       if (kind === 'plugin' || kind === 'project' || kind === 'index') App.loadDashboard();
     } catch (e) {
-      alert('Gagal menghapus "' + name + '": ' + (e?.message || e));
+      alert(friendlyError(e, 'Gagal menghapus "' + name + '": '));
+      if (e?.storage) this.refresh();
     }
   },
   open(name) {
@@ -729,1050 +931,6 @@ const OpfsExplorer = {
     if (action === 'open') this.open(name);
     else if (action === 'download') this.download(name);
     else if (action === 'delete') this.remove(name, row.dataset.dir === '1');
-  }
-};
-
-function pluginFrameMain(token) {
-  'use strict';
-  let plug = null, api = null, settings = {}, pluginId = '', apiVersion = 1, seq = 0, panelMounted = false;
-  const PANEL_BASE_CSS = '*{box-sizing:border-box}html,body{margin:0;height:100%}body{font:13px/1.5 -apple-system,system-ui,"Segoe UI",sans-serif;background:var(--surface,#141519);color:var(--ink,#f4f5f7)}';
-  const pending = new Map();
-  const listeners = new Map();
-  const post = m => parent.postMessage(Object.assign({ t: token }, m), '*');
-  const callHost = (method, args) => new Promise((resolve, reject) => {
-    const id = ++seq;
-    pending.set(id, { resolve, reject });
-    post({ q: 'api', id, method, args });
-  });
-  const toWasmSource = source => {
-    if (source instanceof Uint8Array) return source;
-    if (source instanceof ArrayBuffer) return new Uint8Array(source);
-    throw new Error('Sumber WASM harus Uint8Array atau ArrayBuffer (ambil dari api.asset()).');
-  };
-  const toWasmInput = input => {
-    if (input == null) return new Uint8Array(0);
-    if (typeof input === 'string') return new TextEncoder().encode(input);
-    if (input instanceof Uint8Array) return input;
-    if (input instanceof ArrayBuffer) return new Uint8Array(input);
-    throw new Error('Input WASM harus string, Uint8Array, atau ArrayBuffer.');
-  };
-  const wrapWasm = instance => {
-    const ex = instance.exports;
-    if (!ex || !(ex.memory instanceof WebAssembly.Memory)) throw new Error('Modul WASM harus mengekspor memory.');
-    const wrap = {
-      instance,
-      exports: ex,
-      memory: ex.memory,
-      writeBytes(data) {
-        const u8 = typeof data === 'string' ? new TextEncoder().encode(data) : toWasmInput(data);
-        if (typeof ex.alloc !== 'function') throw new Error('Modul WASM harus mengekspor alloc(size) untuk writeBytes.');
-        const ptr = ex.alloc(u8.length);
-        new Uint8Array(ex.memory.buffer).set(u8, ptr);
-        return { ptr, len: u8.length };
-      },
-      readBytes(ptr, len) { return new Uint8Array(ex.memory.buffer).slice(ptr, ptr + len); },
-      readString(ptr, len) { return new TextDecoder().decode(wrap.readBytes(ptr, len)); },
-      free(ptr, len) { if (typeof ex.free === 'function') ex.free(ptr, len); }
-    };
-    return wrap;
-  };
-  const decodeBuffer = buf => {
-    const b = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
-    for (const enc of ['utf-8', 'shift_jis', 'windows-31j', 'cp932']) {
-      try { return new TextDecoder(enc, { fatal: true }).decode(b); } catch {}
-    }
-    return new TextDecoder('utf-8').decode(b);
-  };
-  const handlers = {
-    init(m) {
-      if (!m || typeof m.code !== 'string') throw new Error('Payload init plugin tidak valid.');
-      pluginId = m.pluginId;
-      apiVersion = m.apiVersion;
-      settings = (m.settings && typeof m.settings === 'object') ? m.settings : {};
-      if (m.jszip) {
-        const s = document.createElement('script');
-        s.textContent = m.jszip;
-        document.documentElement.appendChild(s);
-      }
-      const factory = new Function('module', 'exports', '"use strict";\n' + m.code + '\n;return module.exports;');
-      const mod = { exports: {} };
-      const out = factory(mod, mod.exports);
-      if (!out || typeof out !== 'object') throw new Error('Plugin tidak mengekspor objek.');
-      plug = out;
-      api = {
-        version: apiVersion,
-        pluginId,
-        get settings() { return settings; },
-        toast: msg => callHost('toast', [msg]),
-        copy: text => callHost('copy', [text]),
-        copySelection: () => callHost('copySelection', []),
-        selectRange: (from, to) => callHost('selectRange', [from, to]),
-        clearSelection: () => callHost('clearSelection', []),
-        getSelection: () => callHost('getSelection', []),
-        getProject: () => callHost('getProject', []),
-        getLines: () => callHost('getLines', []),
-        on: (event, handler) => {
-          if (typeof handler !== 'function') return () => {};
-          if (!listeners.has(event)) listeners.set(event, new Set());
-          const set = listeners.get(event);
-          set.add(handler);
-          return () => { try { set.delete(handler); } catch {} };
-        },
-        listAssets: () => callHost('listAssets', []),
-        asset: path => callHost('asset', [path]),
-        assetText: path => callHost('assetText', [path]),
-        get JSZip() { return window.JSZip || null; },
-        wasm: async (source, imports) => {
-          const res = await WebAssembly.instantiate(toWasmSource(source), imports || {});
-          return wrapWasm(res.instance);
-        },
-        runWasm: (source, fn, input) => callHost('runWasm', [source, fn, input]),
-        pickFile: accept => callHost('pickFile', [accept]),
-        download: (data, filename) => callHost('download', [data, filename]),
-        decode: decodeBuffer,
-        saveBlob: (key, data) => callHost('saveBlob', [key, data]),
-        loadBlob: key => callHost('loadBlob', [key]),
-        deleteBlob: key => callHost('deleteBlob', [key]),
-        listBlobs: () => callHost('listBlobs', []),
-        blobExists: key => callHost('blobExists', [key])
-      };
-      const commands = [];
-      if (plug.commands && typeof plug.commands === 'object') {
-        for (const key of Object.keys(plug.commands)) {
-          const cmd = plug.commands[key];
-          if (cmd && typeof cmd === 'object' && typeof cmd.run === 'function') commands.push({ key, label: String(cmd.label || key) });
-        }
-      }
-      const safe = v => { try { return JSON.parse(JSON.stringify(v === undefined ? null : v)); } catch { return null; } };
-      const pluginSettings = [];
-      if (Array.isArray(plug.settings)) for (const it of plug.settings) if (it && typeof it === 'object') pluginSettings.push(safe(it));
-      return {
-        settings: pluginSettings,
-        theme: typeof plug.theme === 'string' ? plug.theme : null,
-        commands,
-        hooks: { onCopy: typeof plug.onCopy === 'function', onApply: typeof plug.onApply === 'function' },
-        extract: typeof plug.extract === 'function',
-        pack: typeof plug.pack === 'function',
-        panel: typeof plug.panel === 'function'
-      };
-    },
-    activate() {
-      if (plug && typeof plug.activate === 'function') return plug.activate(api);
-    },
-    deactivate() {
-      if (plug && typeof plug.deactivate === 'function') return plug.deactivate();
-    },
-    settings(m) {
-      settings = (m.settings && typeof m.settings === 'object') ? m.settings : {};
-    },
-    hook(m) {
-      const fn = plug ? plug[m.name] : null;
-      if (typeof fn !== 'function') return null;
-      return Promise.resolve(fn(m.text, m.ctx)).then(r => (typeof r === 'string' ? r : null));
-    },
-    extract(m) {
-      if (!plug || typeof plug.extract !== 'function') throw new Error('Plugin tidak mendukung extract.');
-      return Promise.resolve(plug.extract({ fileName: m.fileName, buffer: m.buffer, settings, api })).then(out => {
-        if (!out || !Array.isArray(out.lines)) throw new Error('Plugin tidak mengembalikan lines array.');
-        return out;
-      });
-    },
-    pack(m) {
-      if (!plug || typeof plug.pack !== 'function') throw new Error('Plugin tidak mendukung pack.');
-      return Promise.resolve(plug.pack({ lines: m.lines, sourceMap: m.sourceMap, projectName: m.projectName, settings, api })).then(out => {
-        if (!out || !(out.blob instanceof Blob)) throw new Error('Plugin tidak mengembalikan blob yang valid.');
-        return { blob: out.blob, filename: out.filename || null };
-      });
-    },
-    command(m) {
-      const cmd = (plug && plug.commands) ? plug.commands[m.key] : null;
-      if (cmd && typeof cmd.run === 'function') return cmd.run(api);
-    },
-    panel(m) {
-      if (m && typeof m.theme === 'string' && m.theme) {
-        let st = document.getElementById('cstl-theme');
-        if (!st) {
-          st = document.createElement('style');
-          st.id = 'cstl-theme';
-          document.head.appendChild(st);
-        }
-        st.textContent = m.theme + PANEL_BASE_CSS;
-      }
-      if (m && m.open && !panelMounted && plug && typeof plug.panel === 'function') {
-        panelMounted = true;
-        return plug.panel(document.body, api);
-      }
-    },
-    emit(m) {
-      const set = listeners.get(m.event);
-      if (!set) return;
-      for (const fn of Array.from(set)) {
-        try { fn(m.payload); } catch (e) { console.error('[plugin]', e); }
-      }
-    }
-  };
-  addEventListener('message', e => {
-    const m = e.data;
-    if (!m || m.t !== token) return;
-    if (m.q === 'res') {
-      const p = pending.get(m.id);
-      if (!p) return;
-      pending.delete(m.id);
-      if (m.ok) p.resolve(m.val); else p.reject(new Error(m.err || 'RPC gagal.'));
-      return;
-    }
-    if (m.q === 'call') {
-      const h = handlers[m.method];
-      if (!h) { post({ q: 'res', id: m.id, ok: false, err: 'Perintah tidak dikenal: ' + m.method }); return; }
-      Promise.resolve().then(() => h(m.arg)).then(
-        val => post({ q: 'res', id: m.id, ok: true, val: val === undefined ? null : val }),
-        err => post({ q: 'res', id: m.id, ok: false, err: String((err && err.message) || err) })
-      );
-    }
-  });
-  post({ q: 'ready' });
-}
-
-const PluginRuntime = {
-  _index: [],
-  _instances: new Map(),
-  _live: new Set(),
-  _msgBound: false,
-  _jszipSrc: null,
-  _lastThemeCss: null,
-  _styleEl: null,
-  _workerUrl: null,
-
-  async init() {
-    const raw = await Storage.readPluginIndex();
-    const legacy = (raw || []).filter(p => !Array.isArray(p.files));
-    if (legacy.length) console.error(`[plugins] ${legacy.length} plugin format lama (single .js) dihapus — pasang ulang sebagai paket .zip.`);
-    PluginRuntime._index = (raw || []).filter(p => Array.isArray(p.files));
-    if (raw !== null) {
-      await PluginRuntime._sweepOrphanPacks();
-      if (legacy.length) await PluginRuntime._persist();
-    }
-    await PluginRuntime.sync();
-    let dirty = false;
-    for (const meta of PluginRuntime._index) {
-      if (meta.enabled !== true) continue;
-      try { await PluginRuntime._activate(meta); }
-      catch (e) {
-        console.error(`[plugin:${meta.id}] gagal diaktifkan:`, e);
-        meta.enabled = false;
-        dirty = true;
-      }
-    }
-    if (dirty) await PluginRuntime._persist();
-    PluginRuntime.applyTheme();
-    Shortcuts.refreshPluginActions();
-  },
-
-  async sync() {
-    const root = await Storage.root().catch(() => null);
-    if (!root) return false;
-    const alive = [];
-    let changed = false;
-    for (const meta of PluginRuntime._index) {
-      try {
-        await root.getFileHandle(PLUGIN_PREFIX + meta.id + '.zip');
-        alive.push(meta);
-      } catch {
-        PluginRuntime._deactivate(meta.id);
-        changed = true;
-      }
-    }
-    if (!changed) return false;
-    PluginRuntime._index = alive;
-    await PluginRuntime._persist();
-    PluginRuntime.applyTheme();
-    Shortcuts.refreshPluginActions();
-    return true;
-  },
-
-  async _sweepOrphanPacks() {
-    const root = await Storage.root().catch(() => null);
-    if (!root) return;
-    const installed = new Set(PluginRuntime._index.map(p => PLUGIN_PREFIX + p.id + '.zip'));
-    for await (const [name, h] of root.entries()) {
-      if (h.kind !== 'file' || !name.startsWith(PLUGIN_PREFIX)) continue;
-      if (installed.has(name)) continue;
-      try { await root.removeEntry(name); } catch {}
-    }
-  },
-
-  listMeta() { return PluginRuntime._index.slice(); },
-
-  getMeta(id) { return PluginRuntime._index.find(p => p.id === id) || null; },
-
-  async _persist() { await Storage.writePluginIndex(PluginRuntime._index); },
-
-  parseManifest(code) {
-    const m = String(code || '').match(/\/\*\s*@cstl\s*([\s\S]*?)\*\//);
-    if (!m) return null;
-    try { return JSON.parse(m[1].trim()); } catch { return null; }
-  },
-
-  validateManifest(m) {
-    if (!m || typeof m !== 'object') return false;
-    if (typeof m.id !== 'string' || !/^[a-z0-9][a-z0-9_-]*$/i.test(m.id)) return false;
-    if (typeof m.name !== 'string' || !m.name.trim()) return false;
-    if (typeof m.version !== 'string' || !m.version.trim()) return false;
-    if (m.author != null && typeof m.author !== 'string') return false;
-    if (m.description != null && typeof m.description !== 'string') return false;
-    if (m.api != null && (typeof m.api !== 'number' || m.api > PLUGIN_API_VERSION)) return false;
-    if (m.extensions != null) {
-      if (!Array.isArray(m.extensions) || !m.extensions.length) return false;
-      if (!m.extensions.every(e => typeof e === 'string' && e.trim().startsWith('.'))) return false;
-    }
-    if (m.magic != null) {
-      if (!Array.isArray(m.magic) || !m.magic.length) return false;
-      if (!m.magic.every(s => PluginRuntime.validSig(s))) return false;
-    }
-    if (m.ui != null) {
-      if (typeof m.ui !== 'object' || Array.isArray(m.ui)) return false;
-      if (m.ui.title != null && (typeof m.ui.title !== 'string' || !m.ui.title.trim())) return false;
-      if (m.ui.height != null && (typeof m.ui.height !== 'number' || !Number.isFinite(m.ui.height) || m.ui.height <= 0)) return false;
-    }
-    return true;
-  },
-
-  normalizeUi(ui) {
-    if (!ui || typeof ui !== 'object' || Array.isArray(ui)) return null;
-    const out = {};
-    if (typeof ui.title === 'string' && ui.title.trim()) out.title = ui.title.trim().slice(0, 60);
-    if (typeof ui.height === 'number' && Number.isFinite(ui.height)) out.height = Math.min(600, Math.max(120, Math.round(ui.height)));
-    return out;
-  },
-
-  validSig(s) {
-    if (!s || typeof s !== 'object' || Array.isArray(s)) return false;
-    const hasHex = Object.hasOwn(s, 'hex'), hasText = Object.hasOwn(s, 'text');
-    if (hasHex === hasText) return false;
-    if (hasHex) {
-      if (typeof s.hex !== 'string') return false;
-      const h = s.hex.replace(/\s+/g, '');
-      if (!h.length || h.length % 2 || !/^[0-9a-f]+$/i.test(h)) return false;
-    }
-    if (hasText && (typeof s.text !== 'string' || !s.text.length)) return false;
-    if (s.offset != null && (!Number.isInteger(s.offset) || s.offset < 0)) return false;
-    return true;
-  },
-
-  normalizeSig(s) {
-    if (!PluginRuntime.validSig(s)) return null;
-    const offset = Number.isInteger(s.offset) && s.offset >= 0 ? s.offset : 0;
-    if (Object.hasOwn(s, 'hex')) return { hex: s.hex.replace(/\s+/g, '').toLowerCase(), offset };
-    return { hex: Array.from(new TextEncoder().encode(s.text), b => b.toString(16).padStart(2, '0')).join(''), offset };
-  },
-
-  compileSig(s) {
-    const bytes = new Uint8Array(s.hex.length / 2);
-    for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(s.hex.substr(i * 2, 2), 16);
-    return { bytes, offset: s.offset || 0 };
-  },
-
-  normalizeSettings(raw) {
-    if (!Array.isArray(raw)) return [];
-    const out = [];
-    for (const s of raw) {
-      if (!s || typeof s !== 'object') continue;
-      if (typeof s.key !== 'string' || !/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(s.key)) continue;
-      if (typeof s.label !== 'string' || !s.label.trim()) continue;
-      const type = ['string', 'number', 'boolean', 'select', 'textarea'].includes(s.type) ? s.type : 'string';
-      const def = type === 'number' ? (Number(s.default) || 0)
-        : type === 'boolean' ? !!s.default
-        : String(s.default ?? '');
-      const entry = { key: s.key, label: s.label, type, default: def };
-      if (type === 'select' && Array.isArray(s.options)) {
-        entry.options = s.options.map(o => (o && typeof o === 'object')
-          ? { value: String(o.value), label: String(o.label) }
-          : { value: String(o), label: String(o) });
-      }
-      if (typeof s.placeholder === 'string') entry.placeholder = s.placeholder;
-      if (typeof s.description === 'string') entry.description = s.description;
-      out.push(entry);
-    }
-    return out;
-  },
-
-  valuesFor(meta) {
-    const vals = (State.projectId && State.pluginSettings && State.pluginSettings[meta.id] && typeof State.pluginSettings[meta.id] === 'object') ? State.pluginSettings[meta.id] : {};
-    const out = {};
-    for (const s of (meta.settings || [])) out[s.key] = (s.key in vals) ? vals[s.key] : s.default;
-    return out;
-  },
-
-  setValues(id, values) {
-    if (!State.projectId) return;
-    const next = { ...State.pluginSettings };
-    if (values && typeof values === 'object' && Object.keys(values).length) next[id] = values;
-    else delete next[id];
-    State.pluginSettings = next;
-    PluginRuntime.syncSettings();
-    State.queueSave();
-  },
-
-  toWasmSource(source) {
-    if (source instanceof Uint8Array) return source;
-    if (source instanceof ArrayBuffer) return new Uint8Array(source);
-    throw new Error('Sumber WASM harus Uint8Array atau ArrayBuffer (ambil dari api.asset()).');
-  },
-
-  toWasmInput(input) {
-    if (input == null) return new Uint8Array(0);
-    if (typeof input === 'string') return new TextEncoder().encode(input);
-    if (input instanceof Uint8Array) return input;
-    if (input instanceof ArrayBuffer) return new Uint8Array(input);
-    throw new Error('Input WASM harus string, Uint8Array, atau ArrayBuffer.');
-  },
-
-  workerUrl() {
-    if (!PluginRuntime._workerUrl) {
-      const src = '"use strict";self.onmessage=async(e)=>{const{src,fn,input}=e.data;try{const r=await WebAssembly.instantiate(src,{});const ex=r.instance.exports;if(typeof ex[fn]!=="function")throw new Error(\'Export "\'+fn+\'" tidak ditemukan.\');if(typeof ex.alloc!=="function")throw new Error(\'Modul WASM harus mengekspor alloc(size).\');const inPtr=ex.alloc(input.length);new Uint8Array(ex.memory.buffer).set(input,inPtr);const resPtr=ex[fn](inPtr,input.length);const dv=new DataView(ex.memory.buffer);const outLen=dv.getUint32(resPtr,true);const out=new Uint8Array(ex.memory.buffer).slice(resPtr+4,resPtr+4+outLen);if(typeof ex.free==="function"){try{ex.free(inPtr,input.length);ex.free(resPtr,outLen+4);}catch(err){}}self.postMessage({ok:true,output:out});}catch(err){self.postMessage({ok:false,error:String(err&&err.message||err)});}};';
-      PluginRuntime._workerUrl = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
-    }
-    return PluginRuntime._workerUrl;
-  },
-
-  runWasm(source, fn, input) {
-    return new Promise((resolve, reject) => {
-      let wasmBytes, inputBytes;
-      try {
-        wasmBytes = PluginRuntime.toWasmSource(source).slice();
-        inputBytes = PluginRuntime.toWasmInput(input).slice();
-      } catch (e) { reject(e); return; }
-      let worker = null;
-      try { worker = new Worker(PluginRuntime.workerUrl()); }
-      catch {
-        PluginRuntime.runWasmInline(wasmBytes, fn, inputBytes).then(resolve, reject);
-        return;
-      }
-      worker.onmessage = ev => {
-        const d = ev.data || {};
-        worker.terminate();
-        if (d.ok) resolve(d.output);
-        else reject(new Error(d.error || 'runWasm gagal.'));
-      };
-      worker.onerror = ev => {
-        worker.terminate();
-        reject(new Error(ev.message || 'runWasm gagal.'));
-      };
-      worker.postMessage({ src: wasmBytes, fn, input: inputBytes }, [wasmBytes.buffer, inputBytes.buffer]);
-    });
-  },
-
-  async runWasmInline(wasmBytes, fn, inputBytes) {
-    const { instance } = await WebAssembly.instantiate(wasmBytes, {});
-    const ex = instance.exports;
-    if (typeof ex[fn] !== 'function') throw new Error(`Export "${fn}" tidak ditemukan.`);
-    if (typeof ex.alloc !== 'function') throw new Error('Modul WASM harus mengekspor alloc(size).');
-    const inPtr = ex.alloc(inputBytes.length);
-    new Uint8Array(ex.memory.buffer).set(inputBytes, inPtr);
-    const resPtr = ex[fn](inPtr, inputBytes.length);
-    const dv = new DataView(ex.memory.buffer);
-    const outLen = dv.getUint32(resPtr, true);
-    const out = new Uint8Array(ex.memory.buffer).slice(resPtr + 4, resPtr + 4 + outLen);
-    if (typeof ex.free === 'function') {
-      try { ex.free(inPtr, inputBytes.length); ex.free(resPtr, outLen + 4); } catch {}
-    }
-    return out;
-  },
-
-  pickFile(accept) {
-    return new Promise(resolve => {
-      const inp = document.createElement('input');
-      inp.type = 'file';
-      if (accept) inp.accept = String(accept);
-      inp.style.display = 'none';
-      document.body.appendChild(inp);
-      let settled = false;
-      const finish = val => {
-        if (settled) return;
-        settled = true;
-        inp.remove();
-        resolve(val);
-      };
-      inp.addEventListener('change', async () => {
-        const f = inp.files && inp.files[0];
-        if (!f) return finish(null);
-        try { finish({ name: f.name, buffer: await f.arrayBuffer() }); }
-        catch { finish(null); }
-      });
-      inp.addEventListener('cancel', () => finish(null));
-      inp.click();
-    });
-  },
-
-  download(data, filename) {
-    let blob = data instanceof Blob ? data : null;
-    if (!blob) {
-      const body = (data instanceof Uint8Array || data instanceof ArrayBuffer) ? data : String(data ?? '');
-      blob = new Blob([body], { type: 'application/octet-stream' });
-    }
-    download(URL.createObjectURL(blob), String(filename || 'download'));
-  },
-
-  _requireProject() {
-    if (!State.projectId) throw new Error('Tidak ada project aktif untuk operasi blob.');
-  },
-  saveBlob(pluginId, key, data) {
-    PluginRuntime._requireProject();
-    return Storage.saveBlob(State.projectId, pluginId, key, data);
-  },
-  loadBlob(pluginId, key) {
-    PluginRuntime._requireProject();
-    return Storage.loadBlob(State.projectId, pluginId, key);
-  },
-  deleteBlob(pluginId, key) {
-    PluginRuntime._requireProject();
-    return Storage.deleteBlob(State.projectId, pluginId, key);
-  },
-  listBlobs(pluginId) {
-    PluginRuntime._requireProject();
-    return Storage.listBlobs(State.projectId, pluginId);
-  },
-  blobExists(pluginId, key) {
-    PluginRuntime._requireProject();
-    return Storage.blobExists(State.projectId, pluginId, key);
-  },
-
-  resolveAssetPath(path) {
-    const p = String(path ?? '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
-    if (!p || p.split('/').some(seg => seg === '..' || seg === '')) {
-      throw new Error(`Path asset tidak valid: "${path}"`);
-    }
-    return p;
-  },
-
-  async _readAsset(inst, path, type) {
-    const p = PluginRuntime.resolveAssetPath(path);
-    const f = inst.pkg.file(p);
-    if (!f) throw new Error(`Asset "${p}" tidak ditemukan di paket.`);
-    return await f.async(type);
-  },
-
-  async _jszipText() {
-    if (!PluginRuntime._jszipSrc) {
-      const res = await fetch(JSZIP_URL);
-      if (!res.ok) throw new Error('Gagal memuat sumber JSZip.');
-      PluginRuntime._jszipSrc = await res.text();
-    }
-    return PluginRuntime._jszipSrc;
-  },
-
-  _listen() {
-    if (PluginRuntime._msgBound) return;
-    PluginRuntime._msgBound = true;
-    window.addEventListener('message', async e => {
-      let inst = null;
-      for (const i of PluginRuntime._live) if (i.win === e.source) { inst = i; break; }
-      if (!inst) return;
-      const m = e.data;
-      if (!m || m.t !== inst.token) return;
-      if (m.q === 'res') {
-        const p = inst.pending.get(m.id);
-        if (!p) return;
-        inst.pending.delete(m.id);
-        if (m.ok) p.resolve(m.val); else p.reject(new Error(m.err || 'RPC gagal.'));
-        return;
-      }
-      if (m.q === 'ready') { inst.onReady(); return; }
-      if (m.q === 'api') {
-        const fn = PluginRuntime._apiHandlers(inst)[m.method];
-        if (typeof fn !== 'function') { inst.reply(m.id, false, new Error('Metode API tidak dikenal: ' + m.method)); return; }
-        try { inst.reply(m.id, true, await fn(...(m.args || []))); }
-        catch (err) { inst.reply(m.id, false, err); }
-      }
-    });
-  },
-
-  _apiHandlers(inst) {
-    return {
-      toast: msg => App.flash(String(msg ?? '')),
-      copy: text => clipboard(String(text ?? '')),
-      copySelection: () => App.copyForAi(),
-      selectRange: (from, to) => { els.rangeFromInput.value = from; els.rangeToInput.value = to; App.selectRange(); },
-      clearSelection: () => { State.selected.clear(); App.syncCheckboxes(); },
-      getSelection: () => Array.from(State.selected),
-      getProject: () => State.projectId ? {
-        name: State.projectName,
-        type: State.projectType,
-        fileCount: State.files.length,
-        lineCount: State.lines.length,
-        translatedCount: State.translatedCount
-      } : null,
-      getLines: () => State.lines.map(l => ({
-        num: l.line_num,
-        name: l.name,
-        message: l.message,
-        translated: !!l.is_translated,
-        fileName: l.file
-      })),
-      listAssets: () => inst.meta.files.slice(),
-      asset: path => PluginRuntime._readAsset(inst, path, 'uint8array'),
-      assetText: path => PluginRuntime._readAsset(inst, path, 'string'),
-      runWasm: (source, fn, input) => PluginRuntime.runWasm(source, fn, input),
-      pickFile: accept => PluginRuntime.pickFile(accept),
-      download: (data, filename) => PluginRuntime.download(data, filename),
-      saveBlob: (key, data) => PluginRuntime.saveBlob(inst.meta.id, key, data),
-      loadBlob: key => PluginRuntime.loadBlob(inst.meta.id, key),
-      deleteBlob: key => PluginRuntime.deleteBlob(inst.meta.id, key),
-      listBlobs: () => PluginRuntime.listBlobs(inst.meta.id),
-      blobExists: key => PluginRuntime.blobExists(inst.meta.id, key)
-    };
-  },
-
-  async _boot(meta, code, pkg, parentEl) {
-    PluginRuntime._listen();
-    let onReady = () => {};
-    const ready = new Promise(r => { onReady = r; });
-    const frame = document.createElement('iframe');
-    frame.setAttribute('sandbox', 'allow-scripts');
-    if (parentEl) {
-      frame.className = 'plugin-panel-frame';
-      frame.title = (meta.ui && meta.ui.title) || meta.name;
-    } else {
-      frame.setAttribute('aria-hidden', 'true');
-      frame.tabIndex = -1;
-      frame.style.cssText = 'display:none';
-    }
-    const token = (crypto.randomUUID ? crypto.randomUUID() : 't' + Date.now() + Math.random());
-    frame.srcdoc = '<!doctype html><script>(' + pluginFrameMain.toString() + ')(' + JSON.stringify(token) + ');</script>';
-    const inst = {
-      frame,
-      win: null,
-      token,
-      meta,
-      pkg,
-      pending: new Map(),
-      seq: 0,
-      info: null,
-      theme: null,
-      cmdMeta: [],
-      hooks: { onCopy: false, onApply: false },
-      hasExtract: false,
-      hasPack: false,
-      panelCard: parentEl ? parentEl.closest('.plugin-panel-card') : null,
-      onReady,
-      call(method, arg) {
-        return new Promise((resolve, reject) => {
-          const id = ++inst.seq;
-          inst.pending.set(id, { resolve, reject });
-          inst.win.postMessage({ t: inst.token, q: 'call', id, method, arg }, '*');
-        });
-      },
-      reply(id, ok, val) {
-        const msg = { t: inst.token, q: 'res', id, ok };
-        if (ok) msg.val = val; else msg.err = String((val && val.message) || val);
-        try { inst.win.postMessage(msg, '*'); }
-        catch {
-          try { inst.win.postMessage({ t: inst.token, q: 'res', id, ok: false, err: 'Nilai API tidak dapat dikirim.' }, '*'); } catch {}
-        }
-      }
-    };
-    (parentEl || document.body).appendChild(frame);
-    inst.win = frame.contentWindow;
-    PluginRuntime._live.add(inst);
-    let js = null;
-    try { js = await PluginRuntime._jszipText(); } catch {}
-    try {
-      await Promise.race([ready, new Promise((_, rej) => setTimeout(() => rej(new Error('Plugin gagal dimuat.')), 4000))]);
-      const info = await inst.call('init', { pluginId: meta.id, apiVersion: PLUGIN_API_VERSION, code, settings: PluginRuntime.valuesFor(meta), jszip: js });
-      inst.info = info;
-      inst.theme = info.theme;
-      inst.cmdMeta = info.commands || [];
-      inst.hooks = info.hooks || { onCopy: false, onApply: false };
-      inst.hasExtract = !!info.extract;
-      inst.hasPack = !!info.pack;
-      return inst;
-    } catch (e) {
-      PluginRuntime._live.delete(inst);
-      if (inst.panelCard) { try { inst.panelCard.remove(); } catch {} }
-      try { frame.remove(); } catch {}
-      throw e;
-    }
-  },
-
-  _destroy(inst) {
-    PluginRuntime._live.delete(inst);
-    if (inst.panelCard) { try { inst.panelCard.remove(); } catch {} }
-    let killed = false;
-    const kill = () => { if (!killed) { killed = true; try { inst.frame.remove(); } catch {} } };
-    setTimeout(kill, 300);
-    inst.call('deactivate', {}).then(kill, kill);
-  },
-
-  syncSettings() {
-    for (const inst of PluginRuntime._instances.values()) {
-      inst.call('settings', { settings: PluginRuntime.valuesFor(inst.meta) }).catch(() => {});
-    }
-  },
-
-  async _activate(meta) {
-    if (!jsZipReady()) throw new Error('JSZip belum termuat, tunggu sebentar lalu coba lagi.');
-    const zipBuffer = await Storage.loadPluginZip(meta.id);
-    const pkg = await JSZip.loadAsync(zipBuffer).catch(() => { throw new Error('File paket plugin rusak.'); });
-    const entry = pkg.file('plugin.js');
-    if (!entry) throw new Error('plugin.js tidak ditemukan di paket plugin.');
-    const code = await entry.async('string');
-    const host = meta.ui ? PluginRuntime._panelHost(meta) : null;
-    const inst = await PluginRuntime._boot(meta, code, pkg, host && host.body);
-    PluginRuntime._instances.set(meta.id, inst);
-    try { await inst.call('activate', {}); }
-    catch (e) {
-      PluginRuntime._instances.delete(meta.id);
-      PluginRuntime._destroy(inst);
-      throw e;
-    }
-    if (host) PluginRuntime._wirePanel(inst, host);
-    PluginRuntime.syncSettings();
-  },
-
-  _panelHost(meta) {
-    const wrap = document.getElementById('pluginPanels');
-    if (!wrap) return null;
-    const ui = meta.ui || {};
-    const card = document.createElement('div');
-    card.className = 'plugin-panel-card open';
-    card.innerHTML = `
-      <button class="plugin-panel-head" type="button">
-        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-        <span class="plugin-panel-title">${escapeHtml(ui.title || meta.name)}</span>
-        <svg class="plugin-panel-chevron" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-      </button>
-      <div class="plugin-panel-body" style="height:${ui.height || 300}px"></div>`;
-    wrap.appendChild(card);
-    return { card, body: card.querySelector('.plugin-panel-body') };
-  },
-
-  _wirePanel(inst, host) {
-    inst.panelCard = host.card;
-    host.card.querySelector('.plugin-panel-head').addEventListener('click', () => {
-      if (host.card.classList.toggle('open')) PluginRuntime._panelShow(inst);
-    });
-    PluginRuntime._panelShow(inst);
-  },
-
-  _panelShow(inst) {
-    inst.call('panel', { open: true, theme: themeVarsCss() }).catch(e => PluginRuntime._fail(inst.meta, e));
-  },
-
-  _deactivate(id) {
-    const inst = PluginRuntime._instances.get(id);
-    if (!inst) return;
-    PluginRuntime._instances.delete(id);
-    PluginRuntime._destroy(inst);
-  },
-
-  async setEnabled(id, enabled) {
-    const meta = PluginRuntime.getMeta(id);
-    if (!meta) return;
-    if (enabled) {
-      try { await PluginRuntime._activate(meta); }
-      catch (e) {
-        App.flash(`Plugin "${meta.name}" gagal diaktifkan: ${e.message}`);
-        return;
-      }
-    } else {
-      PluginRuntime._deactivate(id);
-    }
-    meta.enabled = !!enabled;
-    await PluginRuntime._persist();
-    PluginRuntime.applyTheme();
-    Shortcuts.refreshPluginActions();
-  },
-
-  applyTheme() {
-    if (!PluginRuntime._styleEl) {
-      PluginRuntime._styleEl = document.createElement('style');
-      PluginRuntime._styleEl.id = 'pluginTheme';
-      document.head.appendChild(PluginRuntime._styleEl);
-    }
-    const parts = [];
-    for (const inst of PluginRuntime._instances.values()) {
-      if (inst.theme) parts.push(inst.theme);
-    }
-    const css = parts.join('\n');
-    PluginRuntime._styleEl.textContent = css;
-    if (css !== PluginRuntime._lastThemeCss) {
-      PluginRuntime._lastThemeCss = css;
-      const vars = themeVarsCss();
-      for (const inst of PluginRuntime._instances.values()) {
-        if (inst.panelCard) inst.call('panel', { theme: vars }).catch(() => {});
-      }
-    }
-  },
-
-  async install(file) {
-    const name = String(file.name || '');
-    if (!/\.zip$/i.test(name)) throw new Error('Plugin harus berupa paket .zip berisi plugin.js di root.');
-    if (!jsZipReady()) throw new Error('JSZip belum termuat, tunggu sebentar lalu coba lagi.');
-    const zipBuffer = await file.arrayBuffer();
-    const zip = await JSZip.loadAsync(zipBuffer).catch(() => { throw new Error('File .zip tidak valid atau rusak.'); });
-    const entry = zip.file('plugin.js');
-    if (!entry) throw new Error('Paket harus berisi plugin.js di root.');
-    const text = await entry.async('string');
-    const files = Object.keys(zip.files)
-      .filter(n => !zip.files[n].dir && n !== 'plugin.js')
-      .map(n => n.replace(/^\.\//, '').replace(/^\/+/, ''))
-      .filter(n => n && !n.split('/').some(seg => seg === '..' || seg === ''))
-      .sort();
-    const manifest = PluginRuntime.parseManifest(text);
-    if (!manifest || !PluginRuntime.validateManifest(manifest)) {
-      throw new Error('File tidak berisi manifest /* @cstl { ... } */ yang valid.');
-    }
-    const meta = {
-      id: manifest.id,
-      name: manifest.name.trim(),
-      version: manifest.version.trim(),
-      author: (manifest.author || '').trim(),
-      description: (manifest.description || '').trim(),
-      extensions: Array.isArray(manifest.extensions) ? manifest.extensions.map(e => e.trim().toLowerCase()) : [],
-      magic: (Array.isArray(manifest.magic) ? manifest.magic : []).map(s => PluginRuntime.normalizeSig(s)).filter(Boolean),
-      ui: PluginRuntime.normalizeUi(manifest.ui),
-      settings: [],
-      files,
-      caps: [],
-      enabled: true,
-      updatedAt: Date.now()
-    };
-    const host = meta.ui ? PluginRuntime._panelHost(meta) : null;
-    const inst = await PluginRuntime._boot(meta, text, zip, host && host.body);
-    const settings = PluginRuntime.normalizeSettings(inst.info.settings);
-    const caps = [];
-    if (manifest.extensions?.length || manifest.magic?.length) caps.push('parser');
-    if (inst.theme && inst.theme.trim()) caps.push('theme');
-    if (inst.hooks.onCopy || inst.hooks.onApply) caps.push('hooks');
-    if (inst.cmdMeta.length) caps.push('commands');
-    if (settings.length) caps.push('settings');
-    if (meta.ui && inst.info.panel) caps.push('panel');
-    const existing = PluginRuntime.getMeta(manifest.id);
-    if (existing && !confirm(`Plugin "${manifest.name}" sudah terpasang (v${existing.version}). Timpa dengan v${manifest.version}?`)) {
-      PluginRuntime._destroy(inst);
-      return null;
-    }
-    meta.settings = settings;
-    meta.caps = caps;
-    meta.enabled = existing ? existing.enabled === true : true;
-    await Storage.savePluginZip(manifest.id, zipBuffer);
-    const i = PluginRuntime._index.findIndex(p => p.id === meta.id);
-    if (i >= 0) PluginRuntime._index[i] = meta; else PluginRuntime._index.push(meta);
-    PluginRuntime._deactivate(meta.id);
-    if (meta.enabled) {
-      try {
-        PluginRuntime._instances.set(meta.id, inst);
-        await inst.call('activate', {});
-        if (host) PluginRuntime._wirePanel(inst, host);
-        PluginRuntime.syncSettings();
-      } catch (e) {
-        PluginRuntime._instances.delete(meta.id);
-        PluginRuntime._destroy(inst);
-        meta.enabled = false;
-        App.flash(`Plugin "${meta.name}" gagal diaktifkan: ${e.message}`);
-      }
-    } else {
-      PluginRuntime._destroy(inst);
-    }
-    await PluginRuntime._persist();
-    PluginRuntime.applyTheme();
-    Shortcuts.refreshPluginActions();
-    return meta;
-  },
-
-  async uninstall(id) {
-    const meta = PluginRuntime.getMeta(id);
-    if (!meta) throw new Error('Plugin tidak ditemukan.');
-    const linked = (await Storage.list()).filter(p => p.projectType === 'plugin' && p.pluginId === id);
-    const msg = linked.length
-      ? `Plugin "${meta.name}" akan dihapus.\n${linked.length} project terkait tetap tersimpan, tetapi butuh plugin ini agar bisa dibuka kembali.\n\nLanjutkan?`
-      : `Plugin "${meta.name}" akan dihapus. Lanjutkan?`;
-    if (!confirm(msg)) return false;
-    PluginRuntime._deactivate(id);
-    for (const p of linked) {
-      try {
-        const data = await Storage.load(p.id);
-        if (!data.pluginName) {
-          data.pluginName = meta.name;
-          await Storage.saveProject(p.id, data);
-        }
-      } catch {}
-    }
-    await Storage.removePluginFile(id);
-    await Storage.removePluginBlobsAll(id);
-    PluginRuntime._index = PluginRuntime._index.filter(p => p.id !== id);
-    await PluginRuntime._persist();
-    PluginRuntime.applyTheme();
-    Shortcuts.refreshPluginActions();
-    return true;
-  },
-
-  resolveByExtension(fileName) {
-    const name = String(fileName || '');
-    const dot = name.lastIndexOf('.');
-    if (dot < 0) return null;
-    const ext = name.slice(dot).toLowerCase();
-    return PluginRuntime._index.find(p => p.enabled === true && (p.extensions || []).some(e => String(e).toLowerCase() === ext)) || null;
-  },
-
-  resolveByMagic(head) {
-    if (!(head instanceof Uint8Array) || !head.length) return null;
-    return PluginRuntime._index.find(p => p.enabled === true && (p.magic || []).some(raw => {
-      const sig = PluginRuntime.compileSig(raw);
-      return sig && sig.offset + sig.bytes.length <= head.length && sig.bytes.every((b, i) => head[sig.offset + i] === b);
-    })) || null;
-  },
-
-  _hookCtx() {
-    return {
-      projectName: State.projectName || null,
-      lineCount: State.lines.length,
-      translatedCount: State.translatedCount,
-      selectedLines: Array.from(State.selected)
-    };
-  },
-
-  async runCopyHook(text) {
-    let out = text;
-    for (const inst of PluginRuntime._instances.values()) {
-      if (!inst.hooks.onCopy) continue;
-      try {
-        const r = await inst.call('hook', { name: 'onCopy', text: out, ctx: PluginRuntime._hookCtx() });
-        if (typeof r === 'string') out = r;
-      } catch (e) { PluginRuntime._fail(inst.meta, e); }
-    }
-    return out;
-  },
-
-  async runApplyHook(text) {
-    let out = text;
-    for (const inst of PluginRuntime._instances.values()) {
-      if (!inst.hooks.onApply) continue;
-      try {
-        const r = await inst.call('hook', { name: 'onApply', text: out, ctx: PluginRuntime._hookCtx() });
-        if (typeof r === 'string') out = r;
-      } catch (e) { PluginRuntime._fail(inst.meta, e); }
-    }
-    return out;
-  },
-
-  emit(event, payload) {
-    for (const inst of PluginRuntime._instances.values()) {
-      inst.call('emit', { event, payload }).catch(() => {});
-    }
-  },
-
-  commands() {
-    const out = [];
-    for (const inst of PluginRuntime._instances.values()) {
-      for (const c of inst.cmdMeta) {
-        out.push({
-          id: `plugin.${inst.meta.id}.${c.key}`,
-          label: c.label,
-          pluginName: inst.meta.name,
-          run: () => inst.call('command', { key: c.key })
-        });
-      }
-    }
-    return out;
-  },
-
-  async runCommand(id) {
-    const cmd = PluginRuntime.commands().find(c => c.id === id);
-    if (!cmd) return;
-    try { await cmd.run(); }
-    catch (e) { PluginRuntime._fail({ id, name: cmd.pluginName }, e); }
-  },
-
-  renderMenu() {
-    const host = els.pluginMenu;
-    if (!host) return;
-    const html = [];
-    const cmds = PluginRuntime.commands();
-    if (cmds.length) {
-      let lastPlugin = null;
-      for (const c of cmds) {
-        if (c.pluginName !== lastPlugin) {
-          lastPlugin = c.pluginName;
-          html.push(`<div class="dropdown-label">${escapeHtml(c.pluginName)}</div>`);
-        }
-        const action = Shortcuts.allActions().find(a => a.id === c.id);
-        const combo = action ? Shortcuts.bindingFor(action) : '';
-        html.push(`<button type="button" class="dropdown-item" data-cmd="${escapeHtml(c.id)}"><span class="menu-label">${escapeHtml(c.label)}</span>${combo ? `<span class="menu-kbd">${comboHtml(combo)}</span>` : ''}</button>`);
-      }
-    }
-    const active = PluginRuntime.listMeta().filter(p => p.enabled === true);
-    const settable = active.filter(p => Array.isArray(p.settings) && p.settings.length > 0);
-    if (settable.length) {
-      if (cmds.length) html.push('<div class="dropdown-sep"></div>');
-      html.push('<div class="dropdown-label">Pengaturan</div>');
-      const gear = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
-      for (const p of settable) {
-        html.push(`<button type="button" class="dropdown-item plugin-settings-item" data-plugin-settings="${escapeHtml(p.id)}" title="Buka pengaturan plugin ini"><span class="menu-label">${escapeHtml(p.name)}</span><span class="menu-icon-btn">${gear}</span></button>`);
-      }
-    }
-    if (!cmds.length && !settable.length) {
-      html.push(active.length
-        ? '<div class="dropdown-hint">Plugin aktif tidak memiliki perintah atau pengaturan.</div>'
-        : '<div class="dropdown-hint">Belum ada plugin aktif. Kelola plugin lewat Pengaturan di halaman utama.</div>');
-    }
-    host.innerHTML = html.join('');
-  },
-
-  async callExtract(meta, input) {
-    const inst = PluginRuntime._instances.get(meta.id);
-    if (!inst) throw new Error(`Plugin "${meta.name}" tidak aktif.`);
-    if (!inst.hasExtract) throw new Error(`Plugin "${meta.name}" tidak mendukung extract.`);
-    const out = await inst.call('extract', { fileName: input.fileName, buffer: input.buffer, settings: input.settings });
-    if (!out || !Array.isArray(out.lines)) throw new Error(`Plugin "${meta.name}" tidak mengembalikan lines array.`);
-    return out;
-  },
-
-  async callPack(meta, input) {
-    const inst = PluginRuntime._instances.get(meta.id);
-    if (!inst) throw new Error(`Plugin "${meta.name}" tidak aktif.`);
-    if (!inst.hasPack) throw new Error(`Plugin "${meta.name}" tidak mendukung pack.`);
-    const out = await inst.call('pack', { lines: input.lines, sourceMap: input.sourceMap, projectName: input.projectName });
-    if (!out || !(out.blob instanceof Blob)) throw new Error(`Plugin "${meta.name}" tidak mengembalikan blob yang valid.`);
-    return out;
-  },
-
-  normalizePluginLines(raw, startNum) {
-    const out = [];
-    let n = startNum;
-    for (const l of (raw || [])) {
-      if (!l || typeof l !== 'object') continue;
-      const msg = String(l.message ?? '').trim();
-      if (!msg) continue;
-      out.push({
-        line_num: n++,
-        file: String(l.file || ''),
-        name: l.name == null ? null : stripNewlines(l.name),
-        message: msg.replace(/\r?\n/g, '\\n').trim(),
-        trans_name: null,
-        trans_message: null,
-        is_translated: false,
-        _n: 1
-      });
-    }
-    return out;
-  },
-
-  toPluginLine(l) {
-    return {
-      line_num: l.line_num,
-      file: l.file,
-      name: l.name,
-      message: l.message,
-      trans_name: l.trans_name,
-      trans_message: l.trans_message,
-      is_translated: !!l.is_translated
-    };
-  },
-
-  _fail(meta, e) {
-    console.error(`[plugin:${meta?.id || '?'}]`, e);
-    App.flash(`Plugin "${meta?.name || '?'}" error: ${e?.message || e}`);
   }
 };
 
@@ -2241,7 +1399,7 @@ async function restoreOne(zip, fallbackName, onProgress) {
     projectName: name,
     projectType: meta.projectType || 'uninitialized',
     pluginId: meta.pluginId || null,
-    pluginName: meta.pluginName || PluginRuntime.getMeta(meta.pluginId)?.name || null,
+    pluginName: meta.pluginName || CSTL.plugins.getMeta(meta.pluginId)?.name || null,
     pluginData: (meta.pluginData && typeof meta.pluginData === 'object') ? meta.pluginData : null,
     epubTags: meta.epubTags || 'p',
     epubSourceId: meta.epubSourceId || null,
@@ -2503,26 +1661,40 @@ const Shortcuts = {
   _pluginActions: [],
   _map: new Map(),
   _recording: null,
+  _bindings: {},
 
-  init() {
+  async init() {
     Shortcuts._actions = SHORTCUT_ACTIONS.slice();
     document.addEventListener('keydown', e => Shortcuts._onKey(e));
+    const raw = await Storage.readJsonFile(SHORTCUTS_FILE);
+    const b = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+    for (const k of Object.keys(b)) {
+      if (typeof b[k] === 'string' && b[k]) Shortcuts._bindings[k] = b[k];
+    }
     Shortcuts.rebuild();
   },
 
   allActions() { return Shortcuts._actions.concat(Shortcuts._pluginActions); },
 
-  loadBindings() {
-    try { return JSON.parse(localStorage.getItem(SHORTCUT_STORAGE_KEY)) || {}; }
-    catch { return {}; }
-  },
+  loadBindings() { return Shortcuts._bindings; },
 
   saveBindings(b) {
-    try { localStorage.setItem(SHORTCUT_STORAGE_KEY, JSON.stringify(b)); } catch {}
+    Shortcuts._bindings = (b && typeof b === 'object' && !Array.isArray(b)) ? b : {};
+    if (Object.keys(Shortcuts._bindings).length) {
+      Storage.writeJsonFile(SHORTCUTS_FILE, Shortcuts._bindings).catch(() => {});
+    } else {
+      Storage.removeFile(SHORTCUTS_FILE).catch(() => {});
+    }
+  },
+
+  resetBindings() {
+    Shortcuts._bindings = {};
+    Storage.removeFile(SHORTCUTS_FILE).catch(() => {});
+    Shortcuts.rebuild();
   },
 
   bindingFor(action) {
-    const b = Shortcuts.loadBindings();
+    const b = Shortcuts._bindings;
     return action.id in b ? b[action.id] : (action.def || '');
   },
 
@@ -2536,12 +1708,12 @@ const Shortcuts = {
   },
 
   refreshPluginActions() {
-    Shortcuts._pluginActions = PluginRuntime.commands().map(c => ({
+    Shortcuts._pluginActions = CSTL.plugins.commands().map(c => ({
       id: c.id,
       label: `${c.pluginName}: ${c.label}`,
       scope: 'always',
       def: '',
-      run: () => PluginRuntime.runCommand(c.id)
+      run: () => CSTL.plugins.runCommand(c.id)
     }));
     Shortcuts.rebuild();
     if (els?.shortcutModal?.classList.contains('open')) App.renderShortcutList();
@@ -2830,9 +2002,10 @@ State.queueSave = () => {
   State.saveTimer = setTimeout(() => {
     const idle = window.requestIdleCallback || (fn => setTimeout(fn, 0));
     idle(async () => {
+      if (!State.projectId) return;
       try {
         await Storage.saveProject(State.projectId, State.toData(), {
-          fileCount: topFileCount(State.files),
+          fileCount: countFiles(State.files),
           lineCount: State.lines.length,
           translatedCount: State.translatedCount
         });
@@ -3106,10 +2279,10 @@ const Importer = {
   async processPlugin(files) {
     const sorted = files.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
     const first = sorted[0];
-    const meta = PluginRuntime.resolveByExtension(first.name) || PluginRuntime.resolveByMagic(await readHead(first));
+    const meta = CSTL.plugins.resolveByExtension(first.name) || CSTL.plugins.resolveByMagic(await readHead(first));
     if (!meta) throw new Error(`Tidak ada plugin aktif yang menangani file "${first.name}".`);
     if (!Importer.assertPluginProjectType(meta)) return null;
-    const settings = PluginRuntime.valuesFor(meta);
+    const settings = CSTL.plugins.valuesFor(meta);
     const startNum = State.lines.length ? State.lines.reduce((m, l) => Math.max(m, l.line_num), 0) + 1 : 1;
     const existing = new Set(State.files);
     const imported = [];
@@ -3124,11 +2297,11 @@ const Importer = {
       const buffer = new Uint8Array(await f.arrayBuffer());
       let out;
       try {
-        out = await PluginRuntime.callExtract(meta, { fileName: f.name, buffer, settings });
+        out = await CSTL.plugins.callExtract(meta, { fileName: f.name, buffer, settings });
       } catch (e) {
         throw new Error(`Plugin "${meta.name}" gagal parse ${bn}: ${e.message}`);
       }
-      const lines = PluginRuntime.normalizePluginLines(out.lines, cur);
+      const lines = CSTL.plugins.normalizePluginLines(out.lines, cur);
       for (const l of lines) l.file = l.file || bn;
       if (lines.length) {
         existing.add(bn);
@@ -3174,10 +2347,10 @@ const Importer = {
           const n = f.name.toLowerCase();
           if (n.endsWith('.epub')) { epubFile = epubFile || f; continue; }
           if (n.endsWith('.json')) { hasJson = true; continue; }
-          const byExt = PluginRuntime.resolveByExtension(f.name);
+          const byExt = CSTL.plugins.resolveByExtension(f.name);
           if (byExt) { pluginMatch = pluginMatch || byExt; continue; }
           const head = await readHead(f);
-          const byMagic = PluginRuntime.resolveByMagic(head);
+          const byMagic = CSTL.plugins.resolveByMagic(head);
           if (byMagic) { pluginMatch = pluginMatch || byMagic; continue; }
           if (!fileExt(f.name)) {
             if (isEpubHead(head)) { epubFile = epubFile || f; continue; }
@@ -3245,7 +2418,7 @@ const Importer = {
         App.refresh(true);
         State.queueSave();
         App.flash(`Berhasil impor ${result.imported.length} baris.${result.skipped.length ? ` (${result.skipped.length} file duplikat diabaikan)` : ''}`);
-        PluginRuntime.emit('import', { lineCount: result.imported.length, fileCount: (result.existing || existing).length });
+        CSTL.plugins.emit('import', { lineCount: result.imported.length, fileCount: (result.existing || existing).length });
       } else if (result.skipped.length) {
         els.copyStatus.classList.add('empty');
         setTimeout(() => alert(`Gagal impor: File duplikat.\n- ${result.skipped.slice(0, 5).join('\n- ')}`), 10);
@@ -3263,7 +2436,7 @@ const Exporter = {
       const result = await buildExportEpub(State.epubSourceId, State.lines, State.epubTags || 'p', State.projectName, Progress.update);
       download(URL.createObjectURL(result.blob), result.name);
       App.flash('Ekspor EPUB berhasil!');
-      PluginRuntime.emit('export', { filename: result.name });
+      CSTL.plugins.emit('export', { filename: result.name });
     }, e => 'Ekspor EPUB gagal: ' + e.message);
   },
 
@@ -3273,20 +2446,20 @@ const Exporter = {
       const result = await buildExportJson(State.lines, State.projectName, Progress.update);
       download(URL.createObjectURL(result.blob), result.name);
       App.flash('Ekspor JSON berhasil!');
-      PluginRuntime.emit('export', { filename: result.name });
+      CSTL.plugins.emit('export', { filename: result.name });
     }, e => 'Ekspor JSON gagal: ' + e.message);
   },
 
   async runPlugin() {
     await withProgress('Membuat file via plugin...', 'Memuat plugin...', async () => {
-      const meta = PluginRuntime.getMeta(State.pluginId);
+      const meta = CSTL.plugins.getMeta(State.pluginId);
       if (!meta) throw new Error('Plugin untuk project ini tidak lagi terpasang. Project tidak bisa diekspor.');
       if (!meta.enabled) throw new Error('Plugin ini dinonaktifkan. Aktifkan di Plugin Manager terlebih dahulu.');
-      const lines = State.lines.map(PluginRuntime.toPluginLine);
+      const lines = State.lines.map(CSTL.plugins.toPluginLine);
       const pluginData = (State.pluginData && typeof State.pluginData === 'object') ? State.pluginData : {};
-      const settings = PluginRuntime.valuesFor(meta);
+      const settings = CSTL.plugins.valuesFor(meta);
       Progress.determinate('Plugin: Membuat output', `0 file`);
-      const out = await PluginRuntime.callPack(meta, {
+      const out = await CSTL.plugins.callPack(meta, {
         lines,
         sourceMap: pluginData,
         projectName: State.projectName || 'untitled',
@@ -3295,7 +2468,7 @@ const Exporter = {
       const filename = out.filename || (sanitizeName(State.projectName) + '_tl' + (meta.extensions[0] || '.bin'));
       download(URL.createObjectURL(out.blob), filename);
       App.flash('Ekspor plugin berhasil!');
-      PluginRuntime.emit('export', { filename });
+      CSTL.plugins.emit('export', { filename });
     }, e => 'Ekspor plugin gagal: ' + e.message);
   },
 
@@ -3322,6 +2495,11 @@ const App = {
   dashboardRendered: 0,
   dashboardObserver: null,
   dashboardSentinel: null,
+  dashboardFailed: false,
+  swRegistered: false,
+  storageCheckBusy: false,
+  storageWatchTimer: null,
+  healScheduled: false,
 
   flash(msg, keep = false) {
     const el = els.copyStatus;
@@ -3347,6 +2525,8 @@ const App = {
       return;
     }
 
+    Storage.sweepTemp();
+
     if (navigator.storage?.persist) {
       try {
         const already = await navigator.storage.persisted?.();
@@ -3367,14 +2547,20 @@ const App = {
     );
 
     App.bind();
-    Shortcuts.init();
-    await PluginRuntime.init();
-    App.renderPluginList();
+    await Shortcuts.init();
+    CSTL.plugins.attach(PluginHost);
+    await CSTL.plugins.init();
+    App.syncImportAccept();
     await App.loadDashboard();
+    App.startStorageWatch();
 
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch(() => {});
-    }
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') App.checkStorageAlive();
+    });
+    window.addEventListener('focus', () => App.checkStorageAlive());
+    window.addEventListener('pageshow', e => {
+      if (e.persisted) App.checkStorageAlive();
+    });
   },
 
   bind() {
@@ -3436,8 +2622,7 @@ const App = {
     els.btnShortcutsClose?.addEventListener('click', () => toggleModal(els.shortcutModal, false));
     els.btnShortcutsResetAll?.addEventListener('click', () => {
       if (!confirm('Reset semua shortcut ke default?')) return;
-      try { localStorage.removeItem(SHORTCUT_STORAGE_KEY); } catch {}
-      Shortcuts.rebuild();
+      Shortcuts.resetBindings();
       App.renderShortcutList();
     });
     els.btnBackupAll.addEventListener('click', App.backupAll);
@@ -3455,71 +2640,6 @@ const App = {
     els.btnOpfsRefresh?.addEventListener('click', () => OpfsExplorer.refresh());
     els.opfsList?.addEventListener('click', e => OpfsExplorer.handleClick(e));
 
-    els.btnPluginManagerOpen?.addEventListener('click', () => {
-      App.openPluginManager();
-    });
-    els.btnPluginManagerClose?.addEventListener('click', () => {
-      toggleModal(els.pluginManagerModal, false);
-      App.loadDashboard();
-    });
-    els.btnPluginRefresh?.addEventListener('click', async () => {
-      await PluginRuntime.sync();
-      App.renderPluginList();
-    });
-
-    els.btnOpenPlugins?.addEventListener('click', () => {
-      PluginRuntime.renderMenu();
-    });
-
-    els.pluginMenu?.addEventListener('click', e => {
-      const setBtn = e.target.closest('[data-plugin-settings]');
-      if (setBtn) {
-        closeDropdowns();
-        const meta = PluginRuntime.getMeta(setBtn.dataset.pluginSettings);
-        if (meta) App.openPluginSettings(meta);
-        return;
-      }
-      const btn = e.target.closest('[data-cmd]');
-      if (!btn) return;
-      closeDropdowns();
-      PluginRuntime.runCommand(btn.dataset.cmd);
-    });
-
-    if (els.btnInstallPlugin) {
-      els.btnInstallPlugin.addEventListener('click', () => els.pluginFileInput?.click());
-    }
-    if (els.pluginFileInput) {
-      els.pluginFileInput.addEventListener('change', async e => {
-        if (!e.target.files.length) { e.target.value = ''; return; }
-        await App.installPlugin(e.target.files[0]);
-        e.target.value = '';
-      });
-    }
-    const pluginListEl = document.getElementById('pluginList');
-    if (pluginListEl) {
-      pluginListEl.addEventListener('dragover', (e) => {
-        if (e.dataTransfer?.types?.includes('Files')) {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'copy';
-          pluginListEl.classList.add('dragover');
-        }
-      });
-      pluginListEl.addEventListener('dragleave', (e) => {
-        if (e.target === pluginListEl) pluginListEl.classList.remove('dragover');
-      });
-      pluginListEl.addEventListener('drop', async (e) => {
-        if (!e.dataTransfer?.files?.length) return;
-        e.preventDefault();
-        pluginListEl.classList.remove('dragover');
-        for (const f of Array.from(e.dataTransfer.files)) {
-          const n = f.name.toLowerCase();
-          if (n.endsWith('.zip')) {
-            await App.installPlugin(f);
-            break;
-          }
-        }
-      });
-    }
   },
 
   bindSortDropdown() {
@@ -4088,7 +3208,7 @@ const App = {
       await Storage.saveProject(id, State.toData());
       App.open(id, State.toData());
     } catch (e) {
-      alert('Gagal membuat project: ' + e.message);
+      alert(friendlyError(e, 'Gagal membuat project: '));
     }
   },
 
@@ -4102,27 +3222,20 @@ const App = {
     els.rangeFromInput.value = '';
     els.rangeToInput.value = '';
 
+    Storage.upsertIndex(Storage.indexEntry(id, data, Date.now())).catch(() => {});
     if (data.projectType === 'epub' && data.epubSourceId) EpubImages.preload(data.epubSourceId);
 
     if (App.dashboardObserver) { App.dashboardObserver.disconnect(); App.dashboardObserver = null; }
+    App.stopStorageWatch();
 
     els.projectNameDisplay.textContent = State.projectName;
     els.dashboardView.classList.remove('open');
     els.workspaceView.style.display = 'flex';
-    PluginRuntime.applyTheme();
-    Shortcuts.refreshPluginActions();
-    App.syncImportAccept(PluginRuntime.listMeta().filter(p => p.enabled === true));
+    CSTL.plugins.onProjectOpened();
     App.applyHideTools();
     App.refresh(false);
     App.syncBookmarkUI();
     App.toggleBookmarkPanel(false);
-    PluginRuntime.syncSettings();
-    PluginRuntime.emit('projectOpen', {
-      name: State.projectName,
-      type: State.projectType,
-      lineCount: State.lines.length,
-      translatedCount: State.translatedCount
-    });
   },
 
   closeProject() {
@@ -4134,24 +3247,17 @@ const App = {
       Storage.saveProject(id, data)
         .then(App.finishClose)
         .catch(e => {
-          alert('Gagal menyimpan perubahan terakhir: ' + e.message);
+          alert(friendlyError(e, 'Gagal menyimpan perubahan terakhir: '));
           App.finishClose();
         });
     } else App.finishClose();
   },
 
   finishClose() {
-    PluginRuntime.emit('projectClose', {
-      name: State.projectName,
-      lineCount: State.lines.length,
-      translatedCount: State.translatedCount
-    });
+    CSTL.plugins.onProjectClosed();
     EpubImages.clear();
     State.resetTransient();
-    PluginRuntime.applyTheme();
-    PluginRuntime.syncSettings();
-    Shortcuts.refreshPluginActions();
-    App.syncImportAccept(PluginRuntime.listMeta());
+    App.syncImportAccept();
     App.main?.setItems([], false);
     App.pr?.setItems([], false);
     els.nameTableBody.replaceChildren();
@@ -4179,6 +3285,7 @@ const App = {
     els.workspaceToolbar.classList.remove('hidden');
     els.btnShowHeader.classList.remove('visible');
     els.dashboardView.classList.add('open');
+    App.startStorageWatch();
     App.loadDashboard();
   },
 
@@ -4189,17 +3296,9 @@ const App = {
     if (App.main) requestAnimationFrame(() => { App.main.invalidate(); App.main.render(); });
   },
 
-  syncImportAccept(plugins) {
-    const exts = new Set(['.json', '.epub']);
-    let magic = false;
-    for (const p of plugins || []) {
-      for (const e of (p.extensions || [])) {
-        const v = String(e).trim().toLowerCase();
-        if (v.startsWith('.')) exts.add(v);
-      }
-      if (Array.isArray(p.magic) && p.magic.length) magic = true;
-    }
-    const accept = magic ? '' : Array.from(exts).join(',');
+  syncImportAccept() {
+    const info = CSTL.plugins.activeParserInfo();
+    const accept = info.magic ? '' : Array.from(info.extensions).join(',');
     if (els.importFileInput) els.importFileInput.accept = accept;
     if (els.importFolderInput) els.importFolderInput.accept = accept;
   },
@@ -4255,207 +3354,74 @@ const App = {
     return row;
   },
 
-  async openPluginManager() {
-    await PluginRuntime.sync();
-    toggleModal(els.pluginManagerModal, true);
-    App.renderPluginList();
-  },
-
-  renderPluginList() {
-    const container = els.pluginList;
-    if (!container) return;
-    const plugins = PluginRuntime.listMeta();
-    App.syncImportAccept(plugins);
-    container.replaceChildren();
-    if (!plugins.length) {
-      container.innerHTML = `
-          <div class="plugin-empty">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 5h4.5a2.5 2.5 0 1 1 5 0H19v4.5a2.5 2.5 0 1 1 0 5V19h-4.5a2.5 2.5 0 1 0-5 0H5v-4.5a2.5 2.5 0 1 0 0-5z"/></svg>
-            <span>Belum ada plugin terpasang.</span>
-          </div>`;
-      return;
-    }
-    const frag = document.createDocumentFragment();
-    for (const p of plugins) frag.appendChild(App.buildPluginCard(p));
-    container.appendChild(frag);
-  },
-
-  buildPluginCard(p) {
-    const row = document.createElement('div');
-    row.className = 'plugin-row' + (p.enabled ? ' is-enabled' : '');
-    const caps = Array.isArray(p.caps) ? p.caps : [];
-    const badges = [];
-    if (caps.includes('parser') && ((p.extensions || []).length || (p.magic || []).length)) {
-      const label = [(p.extensions || []).join(' '), (p.magic || []).length ? '+magic' : ''].filter(Boolean).join(' ');
-      badges.push(`<span class="plugin-badge plugin-badge-parser" title="Menangani import/export format khusus">Parser ${escapeHtml(label)}</span>`);
-    }
-    if (caps.includes('theme')) badges.push('<span class="plugin-badge plugin-badge-theme" title="Mengubah tampilan CSTL">Theme</span>');
-    if (caps.includes('hooks')) badges.push('<span class="plugin-badge plugin-badge-hooks" title="Mengubah alur copy/paste">Hooks</span>');
-    if (caps.includes('commands')) badges.push('<span class="plugin-badge plugin-badge-commands" title="Menyediakan aksi yang bisa di-bind ke shortcut">Commands</span>');
-    if (caps.includes('settings')) badges.push('<span class="plugin-badge plugin-badge-settings" title="Punya pengaturan">Settings</span>');
-    if (caps.includes('panel')) badges.push('<span class="plugin-badge plugin-badge-panel" title="Menyediakan panel UI di sidebar alat">Panel</span>');
-    if (p.files.length) {
-      badges.push(`<span class="plugin-badge plugin-badge-package" title="${escapeHtml(p.files.join('\n'))}">Assets · ${p.files.length}</span>`);
-    }
-    row.innerHTML = `
-      <div class="plugin-head">
-        <div class="plugin-head-main">
-          <span class="plugin-name">${escapeHtml(p.name)}</span>
-          <span class="plugin-version">v${escapeHtml(p.version)}</span>
-        </div>
-        <label class="switch" title="${p.enabled ? 'Nonaktifkan' : 'Aktifkan'} plugin">
-          <input type="checkbox" class="plugin-toggle" ${p.enabled ? 'checked' : ''} />
-          <span class="switch-track"></span>
-        </label>
-      </div>
-      ${badges.length ? `<div class="plugin-badges">${badges.join('')}</div>` : ''}
-      ${p.author || p.description ? `
-      <div class="plugin-meta">
-        ${p.author ? `<span class="plugin-author">by ${escapeHtml(p.author)}</span>` : ''}
-        ${p.description ? `<span class="plugin-desc-inline">${escapeHtml(p.description)}</span>` : ''}
-      </div>` : ''}
-      <div class="plugin-actions">
-        <button class="btn btn-ghost btn-xs btn-uninstall-plugin" title="Hapus plugin">
-          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.4 14.1A2 2 0 0 1 15.6 22H8.4a2 2 0 0 1-2-1.9L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
-          Hapus
-        </button>
-      </div>
-    `;
-    row.querySelector('.plugin-toggle').addEventListener('change', async e => {
-      await PluginRuntime.setEnabled(p.id, e.target.checked);
-      App.renderPluginList();
-    });
-    row.querySelector('.btn-uninstall-plugin').addEventListener('click', async () => {
-      try {
-        const ok = await PluginRuntime.uninstall(p.id);
-        if (ok) {
-          App.renderPluginList();
-          await App.loadDashboard();
-          if (els.shortcutModal.classList.contains('open')) App.renderShortcutList();
-          App.flash(`Plugin "${p.name}" dihapus.`);
-        }
-      } catch (e) {
-        alert('Gagal menghapus plugin: ' + e.message);
-      }
-    });
-    return row;
-  },
-
-  openPluginSettings(pluginMeta) {
-    if (!Array.isArray(pluginMeta.settings) || !pluginMeta.settings.length) {
-      alert('Plugin ini tidak memiliki pengaturan.');
-      return;
-    }
-    const merged = PluginRuntime.valuesFor(pluginMeta);
-    const form = document.createElement('div');
-    form.className = 'plugin-settings-form';
-    for (const s of pluginMeta.settings) {
-      const row = document.createElement('div');
-      row.className = 'plugin-settings-row';
-      const id = `pluginSetting_${pluginMeta.id}_${s.key}`;
-      const cur = merged[s.key];
-      const type = s.type;
-      let inputHtml;
-      if (type === 'boolean') {
-        inputHtml = `<label class="check-line"><input id="${id}" type="checkbox" ${cur ? 'checked' : ''}/> ${escapeHtml(s.label)}</label>`;
-      } else if (type === 'select') {
-        const opts = (s.options || []).map(o => `<option value="${escapeHtml(o.value)}" ${String(cur) === o.value ? 'selected' : ''}>${escapeHtml(o.label)}</option>`).join('');
-        inputHtml = `<select id="${id}" class="input w-full">${opts}</select>`;
-      } else if (type === 'textarea') {
-        inputHtml = `<textarea id="${id}" class="textarea w-full" rows="4" placeholder="${escapeHtml(s.placeholder || '')}">${escapeHtml(String(cur ?? ''))}</textarea>`;
-      } else if (type === 'number') {
-        inputHtml = `<input id="${id}" class="input w-full" type="number" value="${escapeHtml(String(cur ?? ''))}" ${s.min != null ? `min="${s.min}"` : ''} ${s.max != null ? `max="${s.max}"` : ''} ${s.step != null ? `step="${s.step}"` : ''}/>`;
-      } else {
-        inputHtml = `<input id="${id}" class="input w-full" type="text" value="${escapeHtml(String(cur ?? ''))}" placeholder="${escapeHtml(s.placeholder || '')}"/>`;
-      }
-      const labelHtml = type === 'boolean' ? '' : `<label for="${id}" class="plugin-settings-label">${escapeHtml(s.label)}${s.description ? `<span class="plugin-settings-desc">${escapeHtml(s.description)}</span>` : ''}</label>`;
-      row.innerHTML = `<div class="plugin-settings-cell">${labelHtml}${inputHtml}</div>`;
-      form.appendChild(row);
-    }
-
-    const overlay = document.createElement('div');
-    overlay.className = 'backdrop backdrop-top';
-    overlay.innerHTML = `
-      <div class="modal modal-wide" role="dialog" aria-modal="true">
-        <div class="modal-head"><h3>Pengaturan Plugin: ${escapeHtml(pluginMeta.name)}</h3></div>
-        <div class="modal-body"></div>
-        <div class="modal-actions">
-          <button class="btn btn-ghost btn-plugin-settings-reset">Reset Default</button>
-          <span class="grow"></span>
-          <button class="btn btn-ghost btn-plugin-settings-cancel">Batal</button>
-          <button class="btn btn-primary btn-plugin-settings-save">Simpan</button>
-        </div>
-      </div>`;
-    const body = overlay.querySelector('.modal-body');
-    const scopeHint = document.createElement('p');
-    scopeHint.className = 'hint m-0 mt-1 mb-2';
-    scopeHint.textContent = `Nilai hanya berlaku untuk project "${State.projectName || 'ini'}"; project lain memakai nilai default.`;
-    body.append(scopeHint, form);
-    document.body.appendChild(overlay);
-
-    overlay.classList.add('open');
-    const close = () => {
-      overlay.classList.remove('open');
-      overlay.remove();
-    };
-    overlay.querySelector('.btn-plugin-settings-cancel').addEventListener('click', close);
-    overlay.querySelector('.btn-plugin-settings-save').addEventListener('click', async () => {
-      const out = {};
-      for (const s of pluginMeta.settings) {
-        const el = document.getElementById(`pluginSetting_${pluginMeta.id}_${s.key}`);
-        if (!el) continue;
-        if (s.type === 'boolean') out[s.key] = !!el.checked;
-        else if (s.type === 'number') out[s.key] = el.value === '' ? null : Number(el.value);
-        else out[s.key] = el.value;
-      }
-      await PluginRuntime.setValues(pluginMeta.id, out);
-      close();
-      App.renderPluginList();
-      App.flash(`Pengaturan plugin "${pluginMeta.name}" untuk project ini disimpan.`);
-    });
-    overlay.querySelector('.btn-plugin-settings-reset').addEventListener('click', async () => {
-      if (!confirm('Reset pengaturan plugin di project ini ke nilai default?')) return;
-      PluginRuntime.setValues(pluginMeta.id, {});
-      close();
-      App.renderPluginList();
-      App.openPluginSettings(PluginRuntime.getMeta(pluginMeta.id) || pluginMeta);
-    });
-
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-  },
-
-  async installPlugin(file) {
-    await withProgress('Memasang plugin...', 'Membaca file...', async () => {
-      try {
-        const meta = await PluginRuntime.install(file);
-        if (!meta) { Progress.hide(); return; }
-        Progress.update('Memuat ulang daftar plugin...', 100);
-        App.renderPluginList();
-        if (els.shortcutModal.classList.contains('open')) App.renderShortcutList();
-        App.flash(`Plugin "${meta.name}" v${meta.version} ${meta.enabled ? 'aktif' : 'terpasang (nonaktif)'}.`);
-      } catch (e) {
-        Progress.hide();
-        setTimeout(() => alert('Gagal memasang plugin: ' + e.message), 10);
-      }
-    }, () => {});
-  },
-
   async wipeAllData() {
     if (!confirm('Semua project dan data akan dihapus permanen. Lanjutkan?')) return;
-    try { await Storage.wipe(); } catch {}
+    if (State.saveTimer) {
+      clearTimeout(State.saveTimer);
+      State.saveTimer = null;
+    }
+    State.projectId = null;
+    Progress.determinate('Menghapus semua data...', 'Menyiapkan...');
     try {
-      if (window.caches) {
-        const keys = await caches.keys();
-        await Promise.all(keys.map(k => caches.delete(k)));
-      }
+      await Storage.wipe((done, total) => {
+        Progress.update(total ? `Menghapus item ${done}/${total}...` : 'Menghapus...', total ? Math.round(done / total * 100) : 100);
+      });
     } catch {}
+    try { if (window.caches) for (const k of await caches.keys()) await caches.delete(k); } catch {}
     try {
-      if (navigator.serviceWorker) {
-        const regs = await navigator.serviceWorker.getRegistrations();
-        await Promise.all(regs.map(r => r.unregister()));
-      }
+      const regs = await navigator.serviceWorker?.getRegistrations?.();
+      for (const r of regs || []) await r.unregister();
     } catch {}
+    App.swRegistered = false;
+    Progress.hide();
     location.reload();
+  },
+
+  ensureSW() {
+    if (App.swRegistered || !('serviceWorker' in navigator)) return;
+    App.swRegistered = true;
+    navigator.serviceWorker.register('./sw.js').catch(() => { App.swRegistered = false; });
+  },
+
+  checkStorageAlive() {
+    if (!els.dashboardView || !els.dashboardView.classList.contains('open')) return;
+    if (App.storageCheckBusy) return;
+    App.storageCheckBusy = true;
+    const done = () => { App.storageCheckBusy = false; };
+    if (App.dashboardFailed) {
+      Promise.resolve(App.loadDashboard()).then(done, done);
+      return;
+    }
+    Storage.probe()
+      .then(ok => { if (!ok) return App.loadDashboard(); })
+      .catch(() => {})
+      .then(done, done);
+  },
+
+  startStorageWatch() {
+    App.stopStorageWatch();
+    App.storageWatchTimer = setInterval(() => {
+      if (document.hidden) return;
+      App.checkStorageAlive();
+    }, 4000);
+  },
+
+  stopStorageWatch() {
+    if (App.storageWatchTimer) {
+      clearInterval(App.storageWatchTimer);
+      App.storageWatchTimer = null;
+    }
+  },
+
+  scheduleStorageHeal() {
+    if (App.healScheduled) return;
+    App.healScheduled = true;
+    Storage.probe().then(ok => {
+      if (ok) return;
+      if (/[?&]heal=1/.test(location.search)) return;
+      history.replaceState(null, '', location.pathname + (location.search || '') + (location.search ? '&' : '?') + 'heal=1');
+      setTimeout(() => location.reload(), 800);
+    }).catch(() => {});
   },
 
   async loadDashboard() {
@@ -4472,6 +3438,9 @@ const App = {
 
     try {
       const items = await Storage.list();
+      App.dashboardFailed = false;
+      App.healScheduled = false;
+      if (location.search) history.replaceState(null, '', location.pathname);
       App.dashboardAllItems = items;
 
       if (countBadge) {
@@ -4512,7 +3481,28 @@ const App = {
       content.classList.remove('is-empty');
       App.renderDashboardItems();
     } catch {
-      list.innerHTML = `<p class="hint" style="color:var(--danger);">Gagal akses storage.</p>`;
+      App.dashboardFailed = true;
+      Storage.invalidateRoot();
+      App.scheduleStorageHeal();
+      if (countBadge) countBadge.hidden = true;
+      content.classList.remove('is-empty');
+      list.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="var(--danger)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          </div>
+          <h3 class="empty-state-title">Gagal mengakses storage</h3>
+          <p class="empty-state-desc">Browser menolak akses penyimpanan, biasanya karena data situs baru saja dibersihkan. Coba lagi untuk memuat ulang daftar; jika tetap gagal, tutup lalu buka kembali aplikasinya.</p>
+          <div class="empty-state-actions">
+            <button type="button" class="btn btn-primary btn-sm" data-action="retry">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/></svg>
+              Coba Lagi
+            </button>
+          </div>
+        </div>
+      `;
+      const retryBtn = list.querySelector('[data-action="retry"]');
+      if (retryBtn) retryBtn.addEventListener('click', () => App.loadDashboard());
     }
   },
 
@@ -4629,7 +3619,7 @@ const App = {
         badge = '<span class="badge badge-json">JSON-VNTP</span>';
         typeClass = 'is-json';
       } else if (p.projectType === 'plugin') {
-        const pluginMissing = p.pluginId && !PluginRuntime.getMeta(p.pluginId);
+        const pluginMissing = p.pluginId && !CSTL.plugins.getMeta(p.pluginId);
         badge = pluginMissing
           ? `<span class="badge badge-plugin is-missing" title="Plugin ${escapeHtml(p.pluginName || p.pluginId)} tidak terpasang">BUTUH PLUGIN</span>`
           : '<span class="badge badge-plugin">PLUGIN</span>';
@@ -4696,12 +3686,15 @@ const App = {
     card.querySelector('.btn-open').addEventListener('click', async () => {
       try {
         const data = await Storage.load(p.id);
-        if (data.projectType === 'plugin' && data.pluginId && !PluginRuntime.getMeta(data.pluginId)) {
+        if (data.projectType === 'plugin' && data.pluginId && !CSTL.plugins.getMeta(data.pluginId)) {
           alert(`Project ini butuh plugin "${data.pluginName || data.pluginId}" agar bisa dibuka.\nPasang dulu plugin tersebut lewat Pengaturan → Buka Plugin Manager, lalu buka project ini lagi.`);
           return;
         }
         App.open(p.id, data);
-      } catch (e) { alert('Gagal membuka project: ' + e.message); }
+      } catch (e) {
+        alert(friendlyError(e, 'Gagal membuka project: '));
+        if (e?.storage) App.loadDashboard();
+      }
     });
     card.querySelector('.btn-rename').addEventListener('click', async () => {
       const name = prompt('Nama baru:', p.name);
@@ -4711,18 +3704,25 @@ const App = {
         data.projectName = name.trim();
         await Storage.saveProject(p.id, data);
         App.loadDashboard();
-      } catch (e) { alert('Gagal mengubah nama: ' + e.message); }
+      } catch (e) {
+        alert(friendlyError(e, 'Gagal mengubah nama: '));
+        if (e?.storage) App.loadDashboard();
+      }
     });
     card.querySelector('.btn-backup').addEventListener('click', async () => {
       App.backup({ id: p.id, name: p.name });
     });
     card.querySelector('.btn-delete').addEventListener('click', async () => {
       if (!confirm('Hapus permanen?')) return;
+      let epubId = null;
+      try { epubId = (await Storage.load(p.id)).epubSourceId || null; } catch {}
       try {
-        const data = await Storage.load(p.id);
-        await Storage.remove(p.id, data.epubSourceId);
+        await Storage.remove(p.id, epubId);
         App.loadDashboard();
-      } catch (e) { alert('Gagal menghapus: ' + e.message); }
+      } catch (e) {
+        alert(friendlyError(e, 'Gagal menghapus: '));
+        if (e?.storage) App.loadDashboard();
+      }
     });
     return card;
   },
@@ -4732,7 +3732,7 @@ const App = {
       Progress.determinate('Mem-backup project', 'Memproses...');
       const result = await buildBackup(p.id, p.name, Progress.update);
       download(URL.createObjectURL(result.blob), result.name);
-    }, e => 'Gagal backup: ' + e.message);
+    }, e => friendlyError(e, 'Gagal backup: '));
   },
 
   async backupAll() {
@@ -4740,7 +3740,7 @@ const App = {
       Progress.determinate('Mem-backup semua project', 'Memulai...');
       const result = await backupAll(Progress.update);
       download(URL.createObjectURL(result.blob), result.name);
-    }, e => e.message === 'Belum ada Project untuk di-backup.' ? e.message : 'Gagal backup semua project: ' + e.message);
+    }, e => e.message === 'Belum ada Project untuk di-backup.' ? e.message : friendlyError(e, 'Gagal backup semua project: '));
   },
 
   async restoreProject(e) {
@@ -4751,7 +3751,7 @@ const App = {
       const r = await parseRestore(await uploadedFile.arrayBuffer(), uploadedFile.name.replace(/\.cstl$/i, ''), Progress.update);
       await App.loadDashboard();
       return r;
-    }, e => 'File korup: ' + e.message);
+    }, e => friendlyError(e, 'File korup: '));
     if (result) {
       if (result.single) alert(`Project "${result.name}" dipulihkan!`);
       else alert(`${result.ok} project berhasil dipulihkan${result.fail ? `, ${result.fail} gagal` : ''}.`);
@@ -5119,12 +4119,12 @@ const App = {
       if (State.ringkasanPrompt && State.ringkasanPrompt.trim()) parts.push(State.ringkasanPrompt.trim());
     }
     parts.push(sel.map(App.formatLine).join('\n'));
-    const text = await PluginRuntime.runCopyHook(parts.join('\n\n'));
+    const text = await CSTL.plugins.runCopyHook(parts.join('\n\n'));
 
     try {
       await clipboard(text);
       App.flash(`Disalin ${sel.length} baris.`);
-      PluginRuntime.emit('copy', { count: sel.length, lines: sel.map(l => l.line_num) });
+      CSTL.plugins.emit('copy', { count: sel.length, lines: sel.map(l => l.line_num) });
     } catch {
       els.pasteArea.value = text;
       alert("Clipboard diblokir. Teks dipindah ke kolom 'Paste hasil AI'.");
@@ -5178,7 +4178,7 @@ const App = {
 
   async applyTranslation() {
     if (!State.lines.length) return;
-    const raw = await PluginRuntime.runApplyHook(els.pasteArea.value.trim());
+    const raw = await CSTL.plugins.runApplyHook(els.pasteArea.value.trim());
     if (!raw) return alert('Teks kosong.');
 
     const { results, errors, seen, ringkasan } = App.parseAi(raw, State.byNum);
@@ -5225,7 +4225,7 @@ const App = {
     const nums = updates.map(u => u.line.line_num);
     const incMsg = App.applyIncrement(nums);
     App.flash(`${updates.length} baris sukses diterapkan.${incMsg || ''}`);
-    PluginRuntime.emit('apply', { count: updates.length, lines: nums });
+    CSTL.plugins.emit('apply', { count: updates.length, lines: nums });
   },
 
   lastTranslatedNum() {
@@ -5485,6 +4485,77 @@ const App = {
     App.renderProofread();
     State.queueSave();
     alert(`Berhasil replace ${result.count} baris.`);
+  }
+};
+
+const PluginHost = {
+  jszipUrl: JSZIP_URL,
+
+  storage: {
+    readPluginIndex: () => Storage.readPluginIndex(),
+    writePluginIndex: items => Storage.writePluginIndex(items),
+    readPluginSettings: () => Storage.readJsonFile(PLUGIN_SETTINGS_FILE),
+    writePluginSettings: value => Storage.writeJsonFile(PLUGIN_SETTINGS_FILE, value),
+    savePluginZipStream: (id, blob) => Storage.savePluginZipStream(id, blob),
+    pluginZipFile: id => Storage.pluginZipFile(id),
+    pluginZipExists: id => Storage.pluginZipExists(id),
+    listPluginFiles: () => Storage.listPluginFiles(),
+    removePluginFile: id => Storage.removePluginFile(id),
+    saveBlob: (pluginId, key, data) => Storage.saveBlob(State.projectId, pluginId, key, data),
+    loadBlob: (pluginId, key) => Storage.loadBlob(State.projectId, pluginId, key),
+    deleteBlob: (pluginId, key) => Storage.deleteBlob(State.projectId, pluginId, key),
+    listBlobs: pluginId => Storage.listBlobs(State.projectId, pluginId),
+    blobExists: (pluginId, key) => Storage.blobExists(State.projectId, pluginId, key),
+    listProjects: () => Storage.list(),
+    loadProject: id => Storage.load(id),
+    saveProject: (id, data) => Storage.saveProject(id, data)
+  },
+
+  state: {
+    projectId: () => State.projectId,
+    projectName: () => State.projectName,
+    pluginSettings: () => State.pluginSettings,
+    setPluginSettings: v => { State.pluginSettings = v; },
+    queueSave: () => State.queueSave(),
+    projectInfo: () => State.projectId ? {
+      name: State.projectName,
+      type: State.projectType,
+      fileCount: State.files.length,
+      lineCount: State.lines.length,
+      translatedCount: State.translatedCount
+    } : null,
+    lines: () => State.lines,
+    selection: () => Array.from(State.selected),
+    clearSelection: () => { State.selected.clear(); App.syncCheckboxes(); },
+    selectRangeUI: (from, to) => { els.rangeFromInput.value = from; els.rangeToInput.value = to; App.selectRange(); },
+    copyForAi: () => App.copyForAi()
+  },
+
+  ui: {
+    flash: msg => App.flash(msg),
+    escapeHtml,
+    comboHtml,
+    themeVarsCss,
+    shortcutComboFor: id => {
+      const action = Shortcuts.allActions().find(a => a.id === id);
+      return action ? Shortcuts.bindingFor(action) : '';
+    },
+    onPluginsChanged: () => {
+      Shortcuts.refreshPluginActions();
+      App.syncImportAccept();
+    },
+    onShortcutListMaybeRender: () => {
+      if (els.shortcutModal?.classList.contains('open')) App.renderShortcutList();
+    },
+    loadDashboard: () => App.loadDashboard(),
+    closeDropdowns: () => closeDropdowns()
+  },
+
+  util: {
+    jsZipReady,
+    download,
+    clipboard,
+    progress: Progress
   }
 };
 

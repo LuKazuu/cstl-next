@@ -1,12 +1,13 @@
-const CACHE = 'cstl-v1.3.2';
+const CACHE = 'cstl-v1.3.3';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
+  './plugins.js',
   './app.js',
+  './jszip.min.js',
   './manifest.json',
-  './icon.svg',
-  'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'
+  './icon.svg'
 ];
 
 self.addEventListener('install', e => {
