@@ -5,6 +5,7 @@ const VERSION = 1;
 const INDEX_FILE = '_index.json';
 const PLUGINS_FILE = '_plugins.json';
 const PLUGIN_PREFIX = 'plugin_';
+const BLOBS_DIR = '_blobs';
 const PLUGIN_API_VERSION = 1;
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const SHORTCUT_STORAGE_KEY = 'cstl.shortcuts.v1';
@@ -155,6 +156,12 @@ function sanitizeName(s) {
   return name || 'untitled';
 }
 
+function validBlobKey(key) {
+  if (typeof key !== 'string' || !key || key.length > 255) return false;
+  if (key.includes('/') || key.includes('\\') || key === '.' || key === '..') return false;
+  return !/[\x00-\x1f]/.test(key);
+}
+
 function isJapanese(s) {
   return /[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF]/.test(s);
 }
@@ -274,6 +281,7 @@ const Storage = {
   async remove(id, epubId) {
     const root = await Storage.root();
     if (epubId) { try { await root.removeEntry(epubId); } catch {} }
+    await Storage.removeAllBlobs(id);
     await root.removeEntry(id);
     await Storage.removeIndex(id);
   },
@@ -326,6 +334,98 @@ const Storage = {
   async saveEpub(epubId, buffer) {
     const root = await Storage.root();
     await Storage.atomicWrite(root, epubId, buffer);
+  },
+  async _blobProjectDir(root, projectId, create) {
+    const top = await root.getDirectoryHandle(BLOBS_DIR, { create });
+    return await top.getDirectoryHandle(projectId, { create });
+  },
+  async saveBlob(projectId, pluginId, key, data) {
+    if (!validBlobKey(key)) throw new Error('Key blob tidak valid.');
+    let blob;
+    if (data instanceof Blob) blob = data;
+    else if (data instanceof ArrayBuffer || data instanceof Uint8Array) blob = new Blob([data], { type: 'application/octet-stream' });
+    else if (typeof data === 'string') blob = new Blob([data], { type: 'text/plain' });
+    else throw new Error('Data blob tidak valid (harus Blob / ArrayBuffer / Uint8Array / string).');
+    const root = await Storage.root();
+    const projDir = await Storage._blobProjectDir(root, projectId, true);
+    const pluginDir = await projDir.getDirectoryHandle(pluginId, { create: true });
+    await Storage.atomicWrite(pluginDir, key, blob);
+  },
+  async loadBlob(projectId, pluginId, key) {
+    if (!validBlobKey(key)) return null;
+    try {
+      const root = await Storage.root();
+      const projDir = await Storage._blobProjectDir(root, projectId, false);
+      const pluginDir = await projDir.getDirectoryHandle(pluginId);
+      const fh = await pluginDir.getFileHandle(key);
+      return await fh.getFile();
+    } catch { return null; }
+  },
+  async deleteBlob(projectId, pluginId, key) {
+    if (!validBlobKey(key)) return;
+    try {
+      const root = await Storage.root();
+      const projDir = await Storage._blobProjectDir(root, projectId, false);
+      const pluginDir = await projDir.getDirectoryHandle(pluginId);
+      await pluginDir.removeEntry(key);
+    } catch {}
+  },
+  async listBlobs(projectId, pluginId) {
+    try {
+      const root = await Storage.root();
+      const projDir = await Storage._blobProjectDir(root, projectId, false);
+      const pluginDir = await projDir.getDirectoryHandle(pluginId);
+      const keys = [];
+      for await (const [name, h] of pluginDir.entries()) {
+        if (h.kind !== 'file') continue;
+        if (name.startsWith('.') && name.endsWith('.tmp')) continue;
+        keys.push(name);
+      }
+      return keys;
+    } catch { return []; }
+  },
+  async listAllBlobs(projectId) {
+    try {
+      const root = await Storage.root();
+      const projDir = await Storage._blobProjectDir(root, projectId, false);
+      const out = [];
+      for await (const [pid, ph] of projDir.entries()) {
+        if (ph.kind !== 'directory') continue;
+        for await (const [name, fh] of ph.entries()) {
+          if (fh.kind !== 'file') continue;
+          if (name.startsWith('.') && name.endsWith('.tmp')) continue;
+          out.push({ pluginId: pid, key: name, handle: fh });
+        }
+      }
+      return out;
+    } catch { return []; }
+  },
+  async blobExists(projectId, pluginId, key) {
+    if (!validBlobKey(key)) return false;
+    try {
+      const root = await Storage.root();
+      const projDir = await Storage._blobProjectDir(root, projectId, false);
+      const pluginDir = await projDir.getDirectoryHandle(pluginId);
+      await pluginDir.getFileHandle(key);
+      return true;
+    } catch { return false; }
+  },
+  async removePluginBlobsAll(pluginId) {
+    try {
+      const root = await Storage.root();
+      const top = await root.getDirectoryHandle(BLOBS_DIR);
+      for await (const [projectId, ph] of top.entries()) {
+        if (ph.kind !== 'directory') continue;
+        try { await ph.removeEntry(pluginId, { recursive: true }); } catch {}
+      }
+    } catch {}
+  },
+  async removeAllBlobs(projectId) {
+    try {
+      const root = await Storage.root();
+      const top = await root.getDirectoryHandle(BLOBS_DIR);
+      await top.removeEntry(projectId, { recursive: true });
+    } catch {}
   },
   async readPluginIndex() {
     let text;
@@ -729,7 +829,12 @@ function pluginFrameMain(token) {
         runWasm: (source, fn, input) => callHost('runWasm', [source, fn, input]),
         pickFile: accept => callHost('pickFile', [accept]),
         download: (data, filename) => callHost('download', [data, filename]),
-        decode: decodeBuffer
+        decode: decodeBuffer,
+        saveBlob: (key, data) => callHost('saveBlob', [key, data]),
+        loadBlob: key => callHost('loadBlob', [key]),
+        deleteBlob: key => callHost('deleteBlob', [key]),
+        listBlobs: () => callHost('listBlobs', []),
+        blobExists: key => callHost('blobExists', [key])
       };
       const commands = [];
       if (plug.commands && typeof plug.commands === 'object') {
@@ -1108,6 +1213,30 @@ const PluginRuntime = {
     download(URL.createObjectURL(blob), String(filename || 'download'));
   },
 
+  _requireProject() {
+    if (!State.projectId) throw new Error('Tidak ada project aktif untuk operasi blob.');
+  },
+  saveBlob(pluginId, key, data) {
+    PluginRuntime._requireProject();
+    return Storage.saveBlob(State.projectId, pluginId, key, data);
+  },
+  loadBlob(pluginId, key) {
+    PluginRuntime._requireProject();
+    return Storage.loadBlob(State.projectId, pluginId, key);
+  },
+  deleteBlob(pluginId, key) {
+    PluginRuntime._requireProject();
+    return Storage.deleteBlob(State.projectId, pluginId, key);
+  },
+  listBlobs(pluginId) {
+    PluginRuntime._requireProject();
+    return Storage.listBlobs(State.projectId, pluginId);
+  },
+  blobExists(pluginId, key) {
+    PluginRuntime._requireProject();
+    return Storage.blobExists(State.projectId, pluginId, key);
+  },
+
   resolveAssetPath(path) {
     const p = String(path ?? '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
     if (!p || p.split('/').some(seg => seg === '..' || seg === '')) {
@@ -1185,7 +1314,12 @@ const PluginRuntime = {
       assetText: path => PluginRuntime._readAsset(inst, path, 'string'),
       runWasm: (source, fn, input) => PluginRuntime.runWasm(source, fn, input),
       pickFile: accept => PluginRuntime.pickFile(accept),
-      download: (data, filename) => PluginRuntime.download(data, filename)
+      download: (data, filename) => PluginRuntime.download(data, filename),
+      saveBlob: (key, data) => PluginRuntime.saveBlob(inst.meta.id, key, data),
+      loadBlob: key => PluginRuntime.loadBlob(inst.meta.id, key),
+      deleteBlob: key => PluginRuntime.deleteBlob(inst.meta.id, key),
+      listBlobs: () => PluginRuntime.listBlobs(inst.meta.id),
+      blobExists: key => PluginRuntime.blobExists(inst.meta.id, key)
     };
   },
 
@@ -1465,6 +1599,7 @@ const PluginRuntime = {
       } catch {}
     }
     await Storage.removePluginFile(id);
+    await Storage.removePluginBlobsAll(id);
     PluginRuntime._index = PluginRuntime._index.filter(p => p.id !== id);
     await PluginRuntime._persist();
     PluginRuntime.applyTheme();
@@ -2000,6 +2135,10 @@ async function buildBackup(id, name, onProgress) {
   const zip = new JSZip();
   buildProjectZipInner(zip, data);
   if (epubBuffer) zip.file(data.epubSourceId, epubBuffer);
+  const blobs = await Storage.listAllBlobs(id);
+  for (const b of blobs) {
+    try { zip.file(`${BLOBS_DIR}/${b.pluginId}/${b.key}`, await b.handle.getFile()); } catch {}
+  }
   onProgress('Mengompres backup...', 90);
   const blob = await compressZip(zip, 'application/octet-stream');
   return { blob, name: `${sanitizeName(name)}_backup.cstl` };
@@ -2020,6 +2159,10 @@ async function backupAll(onProgress) {
     buildProjectZipInner(zip, data);
     if (data.projectType === 'epub' && data.epubSourceId) {
       try { zip.file(data.epubSourceId, await Storage.loadEpubBuffer(data.epubSourceId)); } catch {}
+    }
+    const blobs = await Storage.listAllBlobs(items[i].id);
+    for (const b of blobs) {
+      try { zip.file(`${BLOBS_DIR}/${b.pluginId}/${b.key}`, await b.handle.getFile()); } catch {}
     }
     const blob = await compressZip(zip, '', 9);
     const base = sanitizeName(data.projectName);
@@ -2122,7 +2265,22 @@ async function restoreOne(zip, fallbackName, onProgress) {
     bookmarks: Array.isArray(meta.bookmarks) ? meta.bookmarks.filter(n => Number.isInteger(n) && n > 0) : [],
     images: Array.isArray(meta.images) ? meta.images : []
   });
+  await restoreBlobsFromZip(zip, id);
   return name;
+}
+
+async function restoreBlobsFromZip(zip, projectId) {
+  const prefix = BLOBS_DIR + '/';
+  for (const entry of Object.values(zip.files)) {
+    if (entry.dir || !entry.name.startsWith(prefix)) continue;
+    const path = entry.name.slice(prefix.length);
+    const slash = path.indexOf('/');
+    if (slash < 0) continue;
+    const pluginId = path.slice(0, slash);
+    const key = path.slice(slash + 1);
+    if (!pluginId || /[\\\/]/.test(pluginId) || !validBlobKey(key)) continue;
+    try { await Storage.saveBlob(projectId, pluginId, key, await entry.async('blob')); } catch {}
+  }
 }
 
 async function parseRestore(buffer, fallbackName, onProgress) {
