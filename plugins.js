@@ -887,8 +887,12 @@ const Dialogs = {
     if (meta.files.length) caps.push(`<span class="cap-chip">${meta.files.length} asset</span>`);
     if (meta.permissions.includes('wasm')) caps.push('<span class="cap-chip">WASM</span>');
 
-    const upgradeNote = existing
+    const shaChanged = !!existing && existing.version === meta.version && existing.fingerprint !== meta.fingerprint;
+    const upgradeNote = existing && !shaChanged
       ? `<div class="consent-upgrade">Memperbarui plugin terpasang: v${esc(existing.version)} &rarr; v${esc(meta.version)}${existing.enabled === false ? ' (saat ini nonaktif)' : ''}${newPerms.length ? ' — <strong>meminta izin baru</strong>' : ''}</div>`
+      : '';
+    const shaNote = shaChanged
+      ? '<div class="consent-newnote">Paket ini berbeda dari yang terpasang meskipun versinya sama (SHA-256 tidak cocok). Tinjau sebelum melanjutkan.</div>'
       : '';
 
     const fingerprint = meta.fingerprint
@@ -925,6 +929,7 @@ const Dialogs = {
       </div>
       ${meta.description ? `<p class="consent-desc">${esc(meta.description)}</p>` : ''}
       ${upgradeNote}
+      ${shaNote}
       ${newPermNote}
       <div class="consent-section-label">Meminta akses</div>
       <div class="consent-perms">${permList}</div>
@@ -1940,14 +1945,13 @@ const Runtime = {
     const existing = Runtime.getMeta(meta.id);
     const prevGranted = Array.isArray(existing?.granted) ? existing.granted : [];
     const newPerms = meta.permissions.filter(p => !prevGranted.includes(p));
+    const shaChanged = !!existing && existing.version === meta.version && existing.fingerprint !== meta.fingerprint;
 
-    if (!existing || newPerms.length) {
+    if (!existing || newPerms.length || shaChanged) {
       const approved = await Dialogs.consent(meta, { existing, newPerms });
       if (!approved) return null;
-      meta.granted = meta.permissions.slice();
-    } else {
-      meta.granted = existing.granted.slice();
     }
+    meta.granted = meta.permissions.slice();
 
     host.util.progress.show('Memasang plugin...', 'Menyimpan paket...');
     try {
