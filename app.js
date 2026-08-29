@@ -3,7 +3,7 @@
 
 const VERSION = 1;
 const INDEX_FILE = '_index.json';
-const PLUGINS_FILE = '_plugins.json';
+const PLUGIN_INDEX_FILE = '_plugin_index.json';
 const PLUGIN_PREFIX = 'plugin_';
 const BLOBS_DIR = '_blobs';
 const JSZIP_URL = './jszip.min.js';
@@ -77,7 +77,7 @@ const DROPDOWNS = [
 ];
 
 const $ = id => document.getElementById(id);
-const escapeHtml = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const { escapeHtml, humanBytes, validBlobKey, sanitizeName, stripNewlines } = CSTL.util;
 const PANEL_THEME_VARS = ['bg', 'bg-elev', 'surface', 'surface-2', 'surface-3', 'hairline', 'hairline-2', 'hairline-3', 'ink', 'ink-dim', 'ink-muted', 'accent', 'accent-hover', 'accent-soft', 'accent-tint', 'accent-edge', 'success', 'success-hover', 'success-soft', 'danger', 'danger-hover', 'danger-soft', 'r-sm', 'r', 'r-lg', 'r-xl', 'r-2xl', 'r-full', 'font', 'font-mono'];
 const themeVarsCss = () => {
   const cs = getComputedStyle(document.documentElement);
@@ -95,10 +95,10 @@ const countFiles = files => (Array.isArray(files) ? files : []).length;
 const isTrans = l => !!l.is_translated;
 const makeProjId = () => 'proj_' + Date.now() + '.cstl';
 const makeEpubId = () => 'epub_' + Date.now() + '.epub';
-const clone = obj => (typeof structuredClone === 'function') ? structuredClone(obj) : JSON.parse(JSON.stringify(obj));
-const schemaDefault = f => (f.def && typeof f.def === 'object') ? clone(f.def) : f.def;
-const snapshot = () => ({ lines: clone(State.lines), selected: new Set(State.selected) });
+const schemaDefault = f => (f.def && typeof f.def === 'object') ? structuredClone(f.def) : f.def;
+const snapshot = () => ({ lines: structuredClone(State.lines), selected: new Set(State.selected) });
 const jsZipReady = () => typeof JSZip !== 'undefined';
+const assertJsZip = () => { if (!jsZipReady()) throw new Error('JSZip tidak tersedia.'); };
 const yieldToEvent = () => new Promise(r => setTimeout(r, 0));
 
 function normalizeLine(l) {
@@ -132,10 +132,6 @@ const isJsonHead = h => {
   return i < h.length && (h[i] === 0x7b || h[i] === 0x5b);
 };
 
-function stripNewlines(v) {
-  return v == null ? null : String(v).replace(/\r?\n/g, '\\n').trim();
-}
-
 function resolveZipPath(baseDir, rel) {
   if (!rel) return null;
   if (/^(?:[a-z]+:)?\/\//i.test(rel) || /^data:/i.test(rel)) return null;
@@ -149,17 +145,6 @@ function resolveZipPath(baseDir, rel) {
     else stack.push(p);
   }
   return stack.join('/');
-}
-
-function sanitizeName(s) {
-  const name = String(s || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().replace(/[.\s]+$/, '');
-  return name || 'untitled';
-}
-
-function validBlobKey(key) {
-  if (typeof key !== 'string' || !key || key.length > 255) return false;
-  if (key.includes('/') || key.includes('\\') || key === '.' || key === '..') return false;
-  return !/[\x00-\x1f]/.test(key);
 }
 
 function isJapanese(s) {
@@ -350,20 +335,15 @@ const Storage = {
     }));
   },
   async saveProject(id, data, counts) {
-    data.updatedAt = Date.now();
+    if (!data.updatedAt) data.updatedAt = Date.now();
     await Storage.atomicWrite(id, JSON.stringify(data));
-    const tc = counts?.translatedCount ?? data.lines?.reduce((n, l) => n + (l.is_translated ? 1 : 0), 0) ?? 0;
-    await Storage.upsertIndex({
-      id,
-      name: data.projectName,
-      projectType: data.projectType || 'uninitialized',
-      pluginId: data.pluginId || null,
-      pluginName: data.pluginName || null,
-      updatedAt: data.updatedAt,
-      fileCount: counts?.fileCount ?? countFiles(data.imported_files),
-      lineCount: counts?.lineCount ?? data.lines?.length ?? 0,
-      translatedCount: tc
+    const meta = Storage.indexEntry(id, data);
+    if (counts) Object.assign(meta, {
+      fileCount: counts.fileCount ?? meta.fileCount,
+      lineCount: counts.lineCount ?? meta.lineCount,
+      translatedCount: counts.translatedCount ?? meta.translatedCount
     });
+    await Storage.upsertIndex(meta);
   },
   async _readFileJson(root, name) {
     const f = await (await root.getFileHandle(name)).getFile();
@@ -535,7 +515,7 @@ const Storage = {
     let text;
     try {
       text = await Storage._withRootRetry(async root => {
-        const f = await (await root.getFileHandle(PLUGINS_FILE)).getFile();
+        const f = await (await root.getFileHandle(PLUGIN_INDEX_FILE)).getFile();
         return await f.text();
       });
     } catch { return []; }
@@ -545,7 +525,7 @@ const Storage = {
     } catch { return null; }
   },
   async writePluginIndex(items) {
-    await Storage.atomicWrite(PLUGINS_FILE, JSON.stringify(items));
+    await Storage.atomicWrite(PLUGIN_INDEX_FILE, JSON.stringify(items));
   },
   async readJsonFile(name) {
     try {
@@ -597,10 +577,8 @@ const Storage = {
     return Storage._queued(async () => {
       try {
         await Storage._withRootRetry(async root => {
-          for (const ext of ['.js', '.zip']) {
-            try { await root.removeEntry(PLUGIN_PREFIX + id + ext); }
-            catch (e) { if (e?.name !== 'NotFoundError') throw e; }
-          }
+          try { await root.removeEntry(PLUGIN_PREFIX + id + '.zip'); }
+          catch (e) { if (e?.name !== 'NotFoundError') throw e; }
         });
       } catch {}
     });
@@ -647,9 +625,9 @@ const OpfsExplorer = {
   path: [],
   classify(name, isDir) {
     if (isDir) return 'folder';
-    if (name === INDEX_FILE || name === PLUGINS_FILE) return 'index';
+    if (name === INDEX_FILE || name === PLUGIN_INDEX_FILE) return 'index';
     if (name === PLUGIN_SETTINGS_FILE || name === SHORTCUTS_FILE) return 'data';
-    if (name.startsWith(PLUGIN_PREFIX) && (name.endsWith('.js') || name.endsWith('.zip'))) return 'plugin';
+    if (name.startsWith(PLUGIN_PREFIX) && name.endsWith('.zip')) return 'plugin';
     if (name.endsWith('.cstl')) return 'project';
     if (name.startsWith('.') && name.endsWith('.tmp')) return 'tmp';
     if (/^epub_/.test(name) || /\.(epub|epub3)$/i.test(name)) return 'epub';
@@ -680,13 +658,6 @@ const OpfsExplorer = {
       other: '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>'
     };
     return SVG(M[isDir ? 'folder' : kind] || M.other);
-  },
-  formatSize(bytes) {
-    if (bytes == null || isNaN(bytes)) return '?';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
   },
   formatDate(ms) {
     if (!ms) return '';
@@ -833,7 +804,7 @@ const OpfsExplorer = {
       : item.kind === 'tmp'
         ? 'File tmp mungkin tidak utuh — unduh dengan hati-hati'
         : 'Unduh file';
-    const sizeLabel = item.isDir ? (item.count + ' item') : this.formatSize(item.size);
+    const sizeLabel = item.isDir ? (item.count + ' item') : humanBytes(item.size);
     row.innerHTML = `
       <div class="opfs-item-icon kind-${item.isDir ? 'folder' : item.kind}" aria-hidden="true">${this.kindIconSvg(item.kind, item.isDir)}</div>
       <div class="opfs-item-info"${item.isDir ? ' data-action="open" title="Buka folder"' : ''}>
@@ -877,7 +848,7 @@ const OpfsExplorer = {
       folder: 'Folder ini dan seluruh isinya akan dihapus.',
       other: 'File ini tidak dikenali. Hapus jika Anda yakin.'
     };
-    const warning = name === PLUGINS_FILE
+    const warning = name === PLUGIN_INDEX_FILE
       ? 'Ini adalah daftar plugin terpasang. Semua plugin akan dihapus dari aplikasi saat dibuka kembali.'
       : warnings[kind] || warnings.other;
     if (!confirm(`Hapus "${name}" dari OPFS?\n\n${warning}\n\nTindakan ini tidak dapat dibatalkan.`)) return;
@@ -889,7 +860,7 @@ const OpfsExplorer = {
       if (!els.opfsList.children.length) {
         this._showEmpty(true);
       }
-      if (kind === 'plugin' && name !== PLUGINS_FILE) await CSTL.plugins.sync();
+      if (kind === 'plugin' && name !== PLUGIN_INDEX_FILE) await CSTL.plugins.sync();
       if (kind === 'plugin' || kind === 'project' || kind === 'index') App.loadDashboard();
     } catch (e) {
       alert(friendlyError(e, 'Gagal menghapus "' + name + '": '));
@@ -1076,7 +1047,7 @@ async function parseFilesList(files, existing, start, onProgress, label = 'file'
 }
 
 async function parseZipJson(buffer, existing, start, onProgress) {
-  if (!jsZipReady()) throw new Error('JSZip tidak tersedia.');
+  assertJsZip();
   const zip = new JSZip();
   await zip.loadAsync(buffer);
   const files = [];
@@ -1087,7 +1058,7 @@ async function parseZipJson(buffer, existing, start, onProgress) {
 }
 
 async function parseEpub(buffer, tags, existing, start, epubId, onProgress) {
-  if (!jsZipReady()) throw new Error('JSZip tidak tersedia.');
+  assertJsZip();
   existing = new Set(existing || []);
   await Storage.saveEpub(epubId, buffer);
   const zip = new JSZip();
@@ -1145,7 +1116,7 @@ async function parseEpub(buffer, tags, existing, start, epubId, onProgress) {
 }
 
 async function buildExportJson(lines, projectName, onProgress) {
-  if (!jsZipReady()) throw new Error('JSZip tidak tersedia.');
+  assertJsZip();
   const grouped = new Map();
   for (const l of lines) {
     let arr = grouped.get(l.file);
@@ -1190,7 +1161,7 @@ async function buildExportJson(lines, projectName, onProgress) {
 }
 
 async function buildExportEpub(epubId, lines, tags, projectName, onProgress) {
-  if (!jsZipReady()) throw new Error('JSZip tidak tersedia.');
+  assertJsZip();
   let buffer = epubId ? await Storage.loadEpubBuffer(epubId) : null;
   if (!buffer) throw new Error('EPUB tidak ditemukan.');
   const zip = new JSZip();
@@ -1262,7 +1233,7 @@ async function compressZip(zip, mimeType, level = 9) {
 }
 
 async function buildBackup(id, name, onProgress) {
-  if (!jsZipReady()) throw new Error('JSZip tidak tersedia.');
+  assertJsZip();
   const data = await Storage.load(id);
   let epubBuffer = null;
   let epubMissing = false;
@@ -1288,7 +1259,7 @@ async function buildBackup(id, name, onProgress) {
 }
 
 async function backupAll(onProgress) {
-  if (!jsZipReady()) throw new Error('JSZip tidak tersedia.');
+  assertJsZip();
   const items = await Storage.list();
   if (!items.length) throw new Error('Belum ada Project untuk di-backup.');
   const total = items.length;
@@ -1409,7 +1380,8 @@ async function restoreOne(zip, fallbackName, onProgress) {
     incrementEnabled: meta.incrementEnabled ?? false,
     incrementStep: meta.incrementStep || 100,
     bookmarks: Array.isArray(meta.bookmarks) ? meta.bookmarks.filter(n => Number.isInteger(n) && n > 0) : [],
-    images: Array.isArray(meta.images) ? meta.images : []
+    images: Array.isArray(meta.images) ? meta.images : [],
+    updatedAt: meta.updatedAt || null
   });
   await restoreBlobsFromZip(zip, id);
   return name;
@@ -1433,7 +1405,7 @@ async function restoreBlobsFromZip(zip, projectId) {
 }
 
 async function parseRestore(buffer, fallbackName, onProgress) {
-  if (!jsZipReady()) throw new Error('JSZip tidak tersedia.');
+  assertJsZip();
   const zip = new JSZip();
   await zip.loadAsync(buffer);
 
@@ -1793,7 +1765,7 @@ const els = {};
 function cacheEls() {
   const ids = [
     'dashboardView', 'workspaceView', 'projectList',
-    'projectCount', 'projectSearch', 'projectSearchClear', 'projectSort',
+    'projectCount', 'projectSearch', 'projectSearchClear', 'projectSort', 'projectSortBox', 'projectSortTrigger', 'projectSortMenu', 'projectSortLabel',
     'btnNewProject', 'btnRestoreProject', 'btnDashboardSettings', 'btnDashboardSettingsClose',
     'btnBackupAll', 'btnWipeAllData',
     'btnBackToDashboard', 'projectNameDisplay', 'dynamicToolbarWrap',
@@ -1835,6 +1807,8 @@ function cacheEls() {
     'bookmarkPanelCount', 'bookmarkList', 'btnBookmarkClear'
   ];
   for (const id of ids) els[id] = $(id);
+  els.split = document.querySelector('.split');
+  els.heroActions = document.querySelector('.hero .actions');
 }
 
 const Progress = {
@@ -1865,6 +1839,7 @@ const State = {
   fileLines: new Map(),
   headerIdx: [],
   selected: new Set(),
+  bookmarkSet: new Set(),
   undo: null,
   redo: null,
   saveTimer: null,
@@ -1888,6 +1863,7 @@ State.toData = () => {
 
 State.maxLineNum = () => State.lines.reduce((m, l) => Math.max(m, l.line_num), 0);
 State.nextLineNum = () => State.lines.length ? State.maxLineNum() + 1 : 1;
+State.indexOfLine = num => State.rows.findIndex(r => r.type === 'line' && r.line.line_num === num);
 
 State.loadFromData = (data) => {
   State.files = data.imported_files || [];
@@ -1982,6 +1958,7 @@ State.rebuild = () => {
   if (State.bookmarks.length) {
     State.bookmarks = State.bookmarks.filter(n => State.byNum.has(n));
   }
+  State.bookmarkSet = new Set(State.bookmarks);
 };
 
 State.queueSave = () => {
@@ -2205,8 +2182,7 @@ class Scroller {
 }
 
 function positionDropdown(panelId) {
-  const triggerMap = { importDropdown: 'btnImportMain', copyNamesDropdown: 'btnCopyAllNames', pluginMenu: 'btnOpenPlugins' };
-  const trigger = els[triggerMap[panelId]];
+  const trigger = els[DROPDOWNS.find(d => d.panel === panelId).trigger];
   const dropdown = els[panelId];
   const r = trigger.getBoundingClientRect();
   if (dropdown.classList.contains('dropdown-right')) {
@@ -2487,6 +2463,7 @@ const App = {
   savedTimer: 0,
   tmpVndb: [],
   dashboardItems: [],
+  dashboardAllItems: [],
   dashboardRendered: 0,
   dashboardObserver: null,
   dashboardSentinel: null,
@@ -2495,6 +2472,8 @@ const App = {
   storageCheckBusy: false,
   storageWatchTimer: null,
   healScheduled: false,
+  _storageCheckCount: 0,
+  _storageCriticalShown: false,
 
   flash(msg, keep = false) {
     const el = els.copyStatus;
@@ -2636,11 +2615,11 @@ const App = {
   },
 
   bindSortDropdown() {
-    const box = document.getElementById('projectSortBox');
-    const trigger = document.getElementById('projectSortTrigger');
-    const menu = document.getElementById('projectSortMenu');
-    const label = document.getElementById('projectSortLabel');
-    const hidden = document.getElementById('projectSort');
+    const box = els.projectSortBox;
+    const trigger = els.projectSortTrigger;
+    const menu = els.projectSortMenu;
+    const label = els.projectSortLabel;
+    const hidden = els.projectSort;
 
     const labelMap = {};
     menu.querySelectorAll('.sort-menu-item').forEach(item => {
@@ -3023,8 +3002,7 @@ const App = {
       const n = Number(wrap.dataset.num);
       if (State.jumpToContext) {
         toggleModal(els.proofreadModal, false);
-        const idx = State.rows.findIndex(r => r.type === 'line' && r.line.line_num === n);
-        if (idx !== -1) { App.main.scrollToIndex(idx); }
+        App.scrollToLine(n);
       } else {
         App.openLineEditor(n);
       }
@@ -3062,7 +3040,7 @@ const App = {
       if (!item) return;
       const n = Number(item.dataset.num);
       if (!n) return;
-      App.scrollToBookmark(n);
+      App.scrollToLine(n);
       App.toggleBookmarkPanel(false);
     });
 
@@ -3070,7 +3048,9 @@ const App = {
       if (!State.bookmarks.length) return;
       if (!confirm('Hapus semua bookmark?')) return;
       State.bookmarks = [];
+      State.bookmarkSet = new Set();
       App.syncBookmarkUI();
+      App.main.forceUpdate();
       App.renderBookmarkList();
       State.queueSave();
     });
@@ -3088,7 +3068,7 @@ const App = {
       }
     });
 
-    window.addEventListener('blur', () => App.toggleBookmarkPanel(false), { once: true });
+    window.addEventListener('blur', () => App.toggleBookmarkPanel(false));
   },
 
   toggleBookmarkPanel(show) {
@@ -3100,13 +3080,17 @@ const App = {
 
   toggleBookmark(num, force) {
     if (!num) return;
-    const idx = State.bookmarks.indexOf(num);
-    const has = idx !== -1;
+    const has = State.bookmarkSet.has(num);
     const next = force === undefined ? !has : force;
-    if (next && !has) State.bookmarks.push(num);
-    else if (!next && has) State.bookmarks.splice(idx, 1);
+    if (next && !has) { State.bookmarks.push(num); State.bookmarkSet.add(num); }
+    else if (!next && has) {
+      const idx = State.bookmarks.indexOf(num);
+      State.bookmarks.splice(idx, 1);
+      State.bookmarkSet.delete(num);
+    }
     else return;
     App.syncBookmarkUI();
+    App.main.forceUpdate();
     if (els.bookmarkPanel.classList.contains('show')) App.renderBookmarkList();
     State.queueSave();
   },
@@ -3116,7 +3100,6 @@ const App = {
     els.bookmarkPanelCount.textContent = `(${count})`;
     els.btnBookmarks.disabled = !State.lines.length;
     els.btnBookmarkClear.disabled = count === 0;
-    App.main.forceUpdate();
   },
 
   renderBookmarkList() {
@@ -3162,10 +3145,9 @@ const App = {
     list.appendChild(frag);
   },
 
-  scrollToBookmark(num) {
-    const idx = State.rows.findIndex(r => r.type === 'line' && r.line.line_num === num);
-    if (idx === -1) return;
-    App.main.scrollToIndex(idx);
+  scrollToLine(num) {
+    const idx = State.indexOfLine(num);
+    if (idx !== -1) App.main.scrollToIndex(idx);
   },
 
   syncSettingsModal() {
@@ -3190,8 +3172,9 @@ const App = {
     State.projectId = id;
     State.projectName = name;
     try {
-      await Storage.saveProject(id, State.toData());
-      App.open(id, State.toData());
+      const data = State.toData();
+      await Storage.saveProject(id, data);
+      App.open(id, data);
     } catch (e) {
       alert(friendlyError(e, 'Gagal membuat project: '));
     }
@@ -3215,7 +3198,7 @@ const App = {
 
     els.projectNameDisplay.textContent = State.projectName;
     els.dashboardView.classList.remove('open');
-    els.workspaceView.style.display = 'flex';
+    els.workspaceView.hidden = false;
     CSTL.plugins.onProjectOpened();
     App.applyHideTools();
     App.refresh(false);
@@ -3264,9 +3247,8 @@ const App = {
     App.toggleBookmarkPanel(false);
     els.bookmarkList.replaceChildren();
     App.syncBookmarkUI();
-    els.workspaceView.style.display = 'none';
-    const split = document.querySelector('.split');
-    split.classList.remove('hide-tools');
+    els.workspaceView.hidden = true;
+    els.split.classList.remove('hide-tools');
     els.workspaceToolbar.classList.remove('hidden');
     els.btnShowHeader.classList.remove('visible');
     els.dashboardView.classList.add('open');
@@ -3275,9 +3257,8 @@ const App = {
   },
 
   applyHideTools() {
-    const split = document.querySelector('.split');
-    split.classList.toggle('hide-tools', State.hideTools);
-    requestAnimationFrame(() => { App.main.invalidate(); App.main.render(); });
+    els.split.classList.toggle('hide-tools', State.hideTools);
+    requestAnimationFrame(() => App.main.forceUpdate());
   },
 
   syncImportAccept() {
@@ -3355,7 +3336,6 @@ const App = {
       const regs = await navigator.serviceWorker?.getRegistrations?.();
       for (const r of regs || []) await r.unregister();
     } catch {}
-    App.swRegistered = false;
     Progress.hide();
     location.reload();
   },
@@ -3384,7 +3364,7 @@ const App = {
 
   async maybePersistAndCheckQuota() {
     await App.ensurePersisted();
-    App._storageCheckCount = (App._storageCheckCount || 0) + 1;
+    App._storageCheckCount++;
     if (App._storageCheckCount % 8 !== 0) return;
     if (!navigator.storage?.estimate) return;
     let est;
@@ -3450,8 +3430,7 @@ const App = {
 
       countBadge.textContent = items.length;
       countBadge.hidden = false;
-      const heroActions = document.querySelector('.hero .actions');
-      heroActions.style.display = items.length ? '' : 'none';
+      els.heroActions.style.display = items.length ? '' : 'none';
       if (!items.length) {
         content.classList.add('is-empty');
         list.innerHTML = `
@@ -3512,7 +3491,7 @@ const App = {
     const sortMode = sortSelect.value || 'newest';
     clearBtn.hidden = !query;
 
-    let items = (App.dashboardAllItems || []).slice();
+    let items = App.dashboardAllItems.slice();
 
     if (query) {
       items = items.filter(p => (p.name || '').toLowerCase().includes(query));
@@ -3983,14 +3962,14 @@ const App = {
       let cls = 'preview-row';
       if (isTrans(l)) cls += ' row-translated';
       if (State.selected.has(l.line_num)) cls += ' row-selected';
-      if (State.bookmarks.includes(l.line_num)) cls += ' row-bookmarked';
+      if (State.bookmarkSet.has(l.line_num)) cls += ' row-bookmarked';
       row.className = cls;
       row._cell.style.display = 'flex';
       row._hdr.style.display = 'none';
       row._cb.dataset.num = l.line_num;
       row._cb.checked = State.selected.has(l.line_num);
       row._cb.disabled = isTrans(l);
-      row._orig.textContent = l.name ? `${l.line_num}. ${l.name}: ${l.message}` : `${l.line_num}. ${l.message}`;
+      row._orig.textContent = App.formatLine(l);
       if (isTrans(l)) {
         row._trans.classList.remove('cell-muted');
         const n = l.trans_name || l.name;
@@ -4001,7 +3980,7 @@ const App = {
       }
       row._bm.style.display = 'inline-flex';
       row._bm.dataset.num = l.line_num;
-      const isBm = State.bookmarks.includes(l.line_num);
+      const isBm = State.bookmarkSet.has(l.line_num);
       row._bm.setAttribute('aria-pressed', isBm ? 'true' : 'false');
       row._bm.title = isBm ? 'Hapus bookmark' : 'Tambah bookmark';
     }
@@ -4013,10 +3992,14 @@ const App = {
     App.updateButtons();
   },
 
-  renderNames() {
+  uniqueNames() {
     const set = new Set();
     for (const l of State.lines) if (l.name) set.add(l.name);
-    const arr = Array.from(set).sort();
+    return Array.from(set).sort();
+  },
+
+  renderNames() {
+    const arr = App.uniqueNames();
     els.nameTotalCount.textContent = arr.length;
 
     const hasNames = arr.length > 0;
@@ -4045,9 +4028,7 @@ const App = {
 
   async copyAllNames(mode) {
     closeDropdowns();
-    const names = new Set();
-    for (const l of State.lines) if (l.name) names.add(l.name);
-    const arr = Array.from(names).sort();
+    const arr = App.uniqueNames();
     if (!arr.length) return;
     const gloss = App.buildGlossaryMap();
     let lines, label;
@@ -4079,9 +4060,7 @@ const App = {
       if (l && !isTrans(l)) State.selected.add(n);
     }
     App.syncCheckboxes();
-
-    const idx = State.rows.findIndex(r => r.type === 'line' && r.line.line_num === from);
-    if (idx !== -1) { App.main.scrollToIndex(idx); }
+    App.scrollToLine(from);
   },
 
   buildGlossaryMap() {
@@ -4122,7 +4101,7 @@ const App = {
       CSTL.plugins.emit('copy', { count: sel.length, lines: sel.map(l => l.line_num) });
     } catch {
       els.pasteArea.value = text;
-      alert("Clipboard diblokir. Teks dipindah ke kolom 'Paste hasil AI'.");
+      alert(`Clipboard diblokir. Teks dipindah ke kolom 'Paste hasil AI'.`);
     }
   },
 
@@ -4273,18 +4252,10 @@ const App = {
       App.syncCheckboxes();
       return ' Semua baris sudah tercakup.';
     }
-    const to = Math.min(from + step - 1, max);
     els.rangeFromInput.value = from;
-    els.rangeToInput.value = to;
-    State.selected.clear();
-    for (let n = from; n <= to; n++) {
-      const l = State.byNum.get(n);
-      if (l && !isTrans(l)) State.selected.add(n);
-    }
-    App.syncCheckboxes();
-    const idx = State.rows.findIndex(r => r.type === 'line' && r.line.line_num === from);
-    if (idx !== -1) { App.main.scrollToIndex(idx); }
-    return ` Rentang berikutnya ${from}-${to} dipilih.`;
+    els.rangeToInput.value = Math.min(from + step - 1, max);
+    App.selectRange();
+    return ` Rentang berikutnya ${from}-${Math.min(from + step - 1, max)} dipilih.`;
   },
 
   _swapHistory(dir) {
@@ -4369,7 +4340,7 @@ const App = {
       if (type === 'check') el.checked = State[key]; else el.value = State[key];
     });
     toggleModal(els.proofreadModal, true);
-    setTimeout(() => App.renderProofread(), 340);
+    requestAnimationFrame(() => App.renderProofread());
   },
 
   renderProofread() {

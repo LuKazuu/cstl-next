@@ -2,6 +2,37 @@ window.CSTL = window.CSTL || {};
 (() => {
 'use strict';
 
+CSTL.util = {
+  stripNewlines(v) {
+    return v == null ? null : String(v).replace(/\r?\n/g, '\\n').trim();
+  },
+  isPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v); },
+  escapeHtml(s) {
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  },
+  sanitizeName(s, { maxLen = 200, stripTrailing = true, fallback = 'untitled' } = {}) {
+    let n = String(s ?? '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim();
+    if (stripTrailing) n = n.replace(/[.\s]+$/, '');
+    if (maxLen) n = n.slice(0, maxLen);
+    return n || fallback;
+  },
+  humanBytes(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v < 0) return '0 B';
+    if (v < 1024) return v + ' B';
+    if (v < 1048576) return (v / 1024).toFixed(1) + ' KB';
+    if (v < 1073741824) return (v / 1048576).toFixed(2) + ' MB';
+    return (v / 1073741824).toFixed(2) + ' GB';
+  },
+  validBlobKey(key) {
+    if (typeof key !== 'string' || !key || key.length > 255) return false;
+    if (key.includes('/') || key.includes('\\') || key === '.' || key === '..') return false;
+    return !/[\x00-\x1f]/.test(key);
+  }
+};
+const { stripNewlines, isPlainObject, escapeHtml, humanBytes, validBlobKey, sanitizeName } = CSTL.util;
+
 const PLUGIN_API_VERSION = 1;
 const MANIFEST_FILE = 'manifest.json';
 const ENTRY_FILE = 'plugin.js';
@@ -42,31 +73,13 @@ const FRAME_CSP = [
   "form-action 'none'"
 ].join('; ');
 
-const esc = s => String(s ?? '')
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const esc = escapeHtml;
 
-const isPlainObject = v => !!v && typeof v === 'object' && !Array.isArray(v);
 const clampInt = (v, min, max, dflt) => {
   const n = Number(v);
   if (!Number.isFinite(n)) return dflt;
   return Math.min(max, Math.max(min, Math.round(n)));
 };
-
-function validBlobKey(key) {
-  if (typeof key !== 'string' || !key || key.length > 255) return false;
-  if (key.includes('/') || key.includes('\\') || key === '.' || key === '..') return false;
-  return !/[\x00-\x1f]/.test(key);
-}
-
-function sanitizeFilename(name) {
-  const n = String(name || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().slice(0, 200);
-  return n || 'download';
-}
-
-function stripNewlines(v) {
-  return v == null ? null : String(v).replace(/\r?\n/g, '\\n').trim();
-}
 
 function fnv1a(bytes) {
   let h = 0x811c9dc5;
@@ -75,15 +88,6 @@ function fnv1a(bytes) {
     h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
   }
   return h.toString(16).padStart(8, '0');
-}
-
-function humanBytes(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v < 0) return '0 B';
-  if (v < 1024) return v + ' B';
-  if (v < 1048576) return (v / 1024).toFixed(1) + ' KB';
-  if (v < 1073741824) return (v / 1048576).toFixed(2) + ' MB';
-  return (v / 1073741824).toFixed(2) + ' GB';
 }
 
 const Sha256 = (() => {
@@ -661,12 +665,10 @@ const Manifest = {
       if (arr.length > 32) errors.push(`"settings.${scope}" maksimal 32 entri.`);
       total += arr.length;
       errors.push(...Manifest.validateSettingList(arr, `settings.${scope}`));
-      if (Array.isArray(arr)) {
-        for (const s of arr) {
-          if (!isPlainObject(s) || typeof s.key !== 'string') continue;
-          if (keysByScope.has(s.key)) errors.push(`Kunci "${s.key}" dipakai di lebih dari satu scope ("${keysByScope.get(s.key)}" dan "${scope}").`);
-          else keysByScope.set(s.key, scope);
-        }
+      for (const s of arr) {
+        if (!isPlainObject(s) || typeof s.key !== 'string') continue;
+        if (keysByScope.has(s.key)) errors.push(`Kunci "${s.key}" dipakai di lebih dari satu scope ("${keysByScope.get(s.key)}" dan "${scope}").`);
+        else keysByScope.set(s.key, scope);
       }
     }
     if (total > 64) errors.push('Total entri settings maksimal 64.');
@@ -826,7 +828,7 @@ const Dialogs = {
       overlay.querySelector('.cstl-dialog-ok').addEventListener('click', () => finish(true));
       overlay.querySelector('.consent-fp-value')?.addEventListener('click', async e => {
         try {
-          await navigator.clipboard.writeText(e.currentTarget.textContent.trim());
+          await host.util.clipboard(e.currentTarget.textContent.trim());
           const prev = e.currentTarget.title;
           e.currentTarget.title = 'Tersalin!';
           host.ui.flash('Sidik jari disalin.');
@@ -868,8 +870,8 @@ const Dialogs = {
           return `<div class="consent-perm">
             <span class="consent-perm-icon">${permSvg(p, 15)}</span>
             <span class="consent-perm-text">
-              <strong>${esc(info.label)}</strong>${isNew(p) ? '<span class="consent-perm-new">BARU</span>' : ''}
-              <span>${esc(info.desc)}</span>
+              <span class="consent-perm-head"><strong>${esc(info.label)}</strong>${isNew(p) ? '<span class="consent-perm-new">BARU</span>' : ''}</span>
+              <span class="consent-perm-desc">${esc(info.desc)}</span>
             </span>
           </div>`;
         }).join('')
@@ -1277,7 +1279,7 @@ const Sandbox = {
       frame.tabIndex = -1;
       frame.style.cssText = 'display:none';
     }
-    const token = (crypto.randomUUID ? crypto.randomUUID() : 't' + Date.now() + Math.random());
+    const token = crypto.randomUUID();
     frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8">'
       + '<meta http-equiv="Content-Security-Policy" content="' + FRAME_CSP.replace(/"/g, '&quot;') + '">'
       + '</head><body><script>(' + pluginFrameMain.toString() + ')(' + JSON.stringify(token) + ');<\/script></body></html>';
@@ -1385,8 +1387,6 @@ const Downloads = {
     Downloads._fillEl = el.querySelector('.np-fill');
   },
 
-  _fmt(n) { return humanBytes(n); },
-
   start(host, total) {
     Downloads._ensure();
     if (Downloads._timer) clearTimeout(Downloads._timer);
@@ -1394,7 +1394,7 @@ const Downloads = {
       Downloads._timer = null;
       Downloads._active = true;
       Downloads._hostEl.textContent = host || 'mengunduh';
-      Downloads._bytesEl.textContent = total ? '0 / ' + Downloads._fmt(total) : '0 B';
+      Downloads._bytesEl.textContent = total ? '0 / ' + humanBytes(total) : '0 B';
       Downloads._fillEl.style.width = total ? '0%' : '35%';
       Downloads._fillEl.classList.toggle('determinate', !!total);
       Downloads._el.classList.add('open');
@@ -1404,10 +1404,10 @@ const Downloads = {
   progress(received, total) {
     if (!Downloads._active) return;
     if (total) {
-      Downloads._bytesEl.textContent = Downloads._fmt(received) + ' / ' + Downloads._fmt(total);
+      Downloads._bytesEl.textContent = humanBytes(received) + ' / ' + humanBytes(total);
       Downloads._fillEl.style.width = Math.min(100, (received / total) * 100) + '%';
     } else {
-      Downloads._bytesEl.textContent = Downloads._fmt(received);
+      Downloads._bytesEl.textContent = humanBytes(received);
     }
   },
 
@@ -1427,7 +1427,7 @@ const NetRunner = {
     if (s === '0.0.0.0' || s === '::' || s === '::1' || s === '0000:0000:0000:0000:0000:0000:0000:0001') return true;
     let m = s.match(/^::ffff:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
     if (m) return NetRunner._isPrivateHost(`${m[1]}.${m[2]}.${m[3]}.${m[4]}`);
-    if (/^::ffff:/.test(s) || /^::ffff:0:/.test(s)) return true;
+    if (/^::ffff:/.test(s)) return true;
     m = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
     if (m) {
       const a = +m[1], b = +m[2];
@@ -1805,10 +1805,6 @@ const Runtime = {
     Runtime.syncSettings();
   },
 
-  _setGlobalValues(id, values) { Runtime._setScopeValues(id, 'global', values); },
-
-  _setSharedValues(id, values) { Runtime._setScopeValues(id, 'shared', values); },
-
   syncSettings() {
     for (const inst of Runtime._instances.values()) {
       inst.call('settings', {
@@ -1919,7 +1915,7 @@ const Runtime = {
     try {
       zip = await ZipReader.open(file).catch(() => { throw new Error('File .zip tidak valid atau rusak.'); });
       if (!zip.has(MANIFEST_FILE)) {
-        throw new Error(`${MANIFEST_FILE} tidak ditemukan di root paket. Struktur standar: paket .zip berisi ${MANIFEST_FILE} + ${ENTRY_FILE} (lihat PLUGIN.md).`);
+        throw new Error(`${MANIFEST_FILE} tidak ditemukan di root paket. Struktur standar: paket .zip berisi ${MANIFEST_FILE} + ${ENTRY_FILE}.`);
       }
       const manifestText = await zip.readText(MANIFEST_FILE);
 
@@ -2140,7 +2136,7 @@ const Runtime = {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = sanitizeFilename(filename);
+    a.download = sanitizeName(filename, { stripTrailing: false, fallback: 'download' });
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   },
@@ -2437,7 +2433,7 @@ const PluginUI = {
 
     const permBadges = (p.permissions || []).map(perm => {
       const info = PERMISSIONS[perm];
-      return `<span class="plugin-badge plugin-badge-perm" title="${esc(info.desc)}">${permSvg(perm, 11)} ${esc(perm === 'project' ? 'Baca project' : perm === 'workspace' ? 'Seleksi' : perm === 'clipboard' ? 'Clipboard' : perm === 'files' ? 'Pilih file' : perm === 'downloads' ? 'Unduhan' : perm === 'storage' ? 'Penyimpanan' : perm === 'wasm' ? 'WASM' : perm === 'jszip' ? 'JSZip' : perm === 'theme' ? 'Tema' : 'Hooks')}<span class="plugin-badge-x">·</span></span>`;
+      return `<span class="plugin-badge plugin-badge-perm" title="${esc(info.desc)}">${permSvg(perm, 11)} ${esc(info.label)}<span class="plugin-badge-x">·</span></span>`;
     }).join('');
 
     const parserBadge = (p.extensions?.length || p.magic?.length)
@@ -2505,7 +2501,7 @@ const PluginUI = {
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Setujui Izin
         </button>` : ''}
-        ${(p.settings?.global?.length || p.settings?.shared?.length) ? `<button type="button" class="btn btn-ghost btn-xs btn-plugin-settings2" title="Pengaturan global plugin">
+        ${(p.settings?.global?.length || p.settings?.shared?.length) ? `<button type="button" class="btn btn-ghost btn-xs btn-plugin-global-settings" title="Pengaturan global plugin">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
           Setelan Global
         </button>` : ''}
@@ -2532,7 +2528,7 @@ const PluginUI = {
       PluginUI.reviewConsent(p);
     });
 
-    row.querySelector('.btn-plugin-settings2')?.addEventListener('click', () => {
+    row.querySelector('.btn-plugin-global-settings')?.addEventListener('click', () => {
       PluginUI.openSettings(p, 'global');
     });
 
@@ -2550,8 +2546,8 @@ const PluginUI = {
       }
     });
 
-    row.querySelector('.plugin-detail-fp')?.addEventListener('click', async e => {
-      try { await navigator.clipboard.writeText(p.fingerprint || ''); host.ui.flash('Sidik jari disalin.'); } catch {}
+    row.querySelector('.plugin-detail-fp')?.addEventListener('click', async () => {
+      try { await host.util.clipboard(p.fingerprint || ''); host.ui.flash('Sidik jari disalin.'); } catch {}
     });
 
     return row;
@@ -2774,10 +2770,10 @@ const PluginUI = {
     });
     overlay.querySelector('.btn-plugin-settings-save').addEventListener('click', () => {
       if (hasOwn) {
-        if (scope === 'global') Runtime._setGlobalValues(meta.id, PluginUI._readFields(meta, ownFields));
+        if (scope === 'global') Runtime._setScopeValues(meta.id, 'global', PluginUI._readFields(meta, ownFields));
         else Runtime._setValues(meta.id, PluginUI._readFields(meta, ownFields));
       }
-      if (hasShared) Runtime._setSharedValues(meta.id, PluginUI._readFields(meta, sharedFields));
+      if (hasShared) Runtime._setScopeValues(meta.id, 'shared', PluginUI._readFields(meta, sharedFields));
       close();
       host.ui.flash(`Setelan ${scopeLabel.toLowerCase()} "${meta.name}" disimpan.`);
     });
@@ -2806,11 +2802,8 @@ CSTL.plugins = {
 
   async init() { return Runtime.init(); },
   async sync() { return Runtime.sync(); },
-  listMeta() { return Runtime.listMeta(); },
   getMeta(id) { return Runtime.getMeta(id); },
   valuesFor(meta) { return Runtime.valuesFor(meta); },
-  globalValuesFor(meta) { return Runtime.globalValuesFor(meta); },
-  sharedValuesFor(meta) { return Runtime.sharedValuesFor(meta); },
   activeParserInfo() { return Runtime.activeParserInfo(); },
   resolveByExtension(name) { return Runtime.resolveByExtension(name); },
   resolveByMagic(head) { return Runtime.resolveByMagic(head); },
@@ -2824,12 +2817,7 @@ CSTL.plugins = {
   commands() { return Runtime.commands(); },
   async runCommand(id) { return Runtime.runCommand(id); },
   onProjectOpened() { return Runtime.onProjectOpened(); },
-  onProjectClosed() { return Runtime.onProjectClosed(); },
-
-  openSettings(meta, scope) { return PluginUI.openSettings(meta, scope); },
-  openManager() { return PluginUI.openManager(); },
-  renderMenu() { return PluginUI.renderMenu(); },
-  renderList() { return PluginUI.renderList(); }
+  onProjectClosed() { return Runtime.onProjectClosed(); }
 };
 
 })();
