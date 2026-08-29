@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0b0c0e" />
   <meta name="color-scheme" content="dark" />
   <meta name="description" content="Copas Tool" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob: data:; connect-src 'self' https://api.vndb.org; worker-src 'self' blob:; frame-src 'self' blob: data:; object-src 'none'; base-uri 'self'; form-action 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob: data:; connect-src 'self' http: https:; worker-src 'self' blob:; frame-src 'self' blob: data:; object-src 'none'; base-uri 'self'; form-action 'none'" />
   <title>Copas Tool</title>
   <link rel="manifest" href="./manifest.json" />
   <link rel="icon" type="image/svg+xml" href="./icon.svg" />
@@ -186,7 +186,7 @@
           </div>
           <div id="previewContainer" class="preview-container"></div>
         </div>
-        <div id="bookmarkDock" class="bookmark-dock">
+        <div class="bookmark-dock">
           <div id="bookmarkPanel" class="bookmark-panel" role="dialog" aria-modal="false">
             <div class="bookmark-panel-head">
               <span class="bookmark-panel-title">Bookmark <span id="bookmarkPanelCount" class="bookmark-panel-count">(0)</span></span>

@@ -15,6 +15,7 @@ const ZIP_BOMB_FLOOR_BYTES = 64 * 1024 * 1024;
 const ZIP_BOMB_RATIO = 100;
 
 const BOOT_TIMEOUT_MS = 8000;
+const CALL_TIMEOUT_DEFAULT_MS = 30000;
 const WASM_TIMEOUT_DEFAULT = 10000;
 const WASM_TIMEOUT_MIN = 1000;
 const WASM_TIMEOUT_MAX = 60000;
@@ -22,6 +23,9 @@ const WASM_MODULE_CACHE_MAX = 8;
 
 const RATE_DOWNLOAD_PER_MIN = 20;
 const RATE_TOAST_PER_MIN = 30;
+const RATE_FETCH_PER_MIN = 60;
+const NET_TIMEOUT_DEFAULT_MS = 30000;
+const NET_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 
 const BUILTIN_EXTENSIONS = new Set(['.json', '.epub']);
 
@@ -30,7 +34,7 @@ const FRAME_CSP = [
   "script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
   "style-src 'unsafe-inline'",
   "img-src data: blob:",
-  "font-src data:",
+  "font-src data: blob:",
   "connect-src 'none'",
   "media-src 'none'",
   "object-src 'none'",
@@ -77,11 +81,10 @@ function humanBytes(n) {
   const v = Number(n);
   if (!Number.isFinite(v) || v < 0) return '0 B';
   if (v < 1024) return v + ' B';
-  if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB';
-  return (v / (1024 * 1024)).toFixed(1) + ' MB';
+  if (v < 1048576) return (v / 1024).toFixed(1) + ' KB';
+  if (v < 1073741824) return (v / 1048576).toFixed(2) + ' MB';
+  return (v / 1073741824).toFixed(2) + ' GB';
 }
-
-const yieldToEvent = () => new Promise(r => setTimeout(r, 0));
 
 const Sha256 = (() => {
   const K = new Uint32Array([
@@ -254,10 +257,8 @@ const ZipReader = {
       seen++;
     }
     return {
-      size,
       names() { return Array.from(entries.keys()); },
       has(n) { return entries.has(String(n)); },
-      entry(n) { return entries.get(String(n)) || null; },
       readBytes(n) { return ZipReader._read(blob, entries.get(String(n))); },
       readText(n) { return ZipReader._read(blob, entries.get(String(n))).then(b => new TextDecoder().decode(b)); }
     };
@@ -500,6 +501,11 @@ const PERMISSIONS = {
     desc: 'CSS tema tampilan (offline, tanpa jaringan).',
     icon: '<circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="10.5" r="2.5"/><circle cx="8.5" cy="7.5" r="2.5"/><circle cx="6.5" cy="12.5" r="2.5"/><path d="M12 2a10 10 0 1 0 10 10c0-1-1-2-2-2h-2a2 2 0 0 1-2-2c0-.5.2-1 .5-1.5A10 10 0 0 0 12 2z"/>'
   },
+  net: {
+    label: 'Akses Internet',
+    desc: 'Mengirim permintaan HTTP/HTTPS ke server mana pun.',
+    icon: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>'
+  },
   hooks: {
     label: 'Copy/paste',
     desc: 'Membaca dan mengubah teks copy/paste.',
@@ -552,8 +558,7 @@ const Manifest = {
       errors.push('"description" opsional, string maks 300 karakter.');
     }
 
-    if (m.api === undefined) {  }
-    else if (m.api !== PLUGIN_API_VERSION) {
+    if (m.api !== undefined && m.api !== PLUGIN_API_VERSION) {
       errors.push(`"api" harus ${PLUGIN_API_VERSION} — satu-satunya versi API yang didukung versi aplikasi ini.`);
     }
 
@@ -788,7 +793,7 @@ const Dialogs = {
     return new Promise(resolve => {
       if (Dialogs._active) { resolve(null); return; }
       const overlay = document.createElement('div');
-      overlay.className = 'backdrop cstl-dialog' + (wide ? ' cstl-dialog-wide' : '');
+      overlay.className = 'backdrop cstl-dialog';
       overlay.innerHTML = `
         <div class="modal ${wide ? 'modal-wide' : ''}" role="dialog" aria-modal="true">
           <div class="modal-head"><h3>${esc(title)}</h3></div>
@@ -839,14 +844,7 @@ const Dialogs = {
   },
 
   confirm(opts) {
-    return Dialogs._create({
-      title: opts.title,
-      bodyHtml: opts.bodyHtml,
-      confirmLabel: opts.confirmLabel,
-      cancelLabel: opts.cancelLabel,
-      danger: !!opts.danger,
-      wide: opts.wide
-    });
+    return Dialogs._create({ ...opts, danger: !!opts.danger });
   },
 
   info(title, bodyHtml) {
@@ -904,6 +902,17 @@ const Dialogs = {
       ? `<div class="consent-newnote">Versi ini meminta izin yang belum pernah kamu setujui. Tinjau sebelum melanjutkan.</div>`
       : '';
 
+    const hasNet = meta.permissions.includes('net');
+    const noticeHtml = hasNet
+      ? `<div class="consent-notice" style="border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.08);color:#fca5a5">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+          <span>Plugin ini <strong>dapat mengakses internet</strong> dan mengirim permintaan ke server mana pun. Hanya pasang jika kamu memercayai sumbernya.</span>
+        </div>`
+      : `<div class="consent-notice">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>Plugin berjalan di sandbox <strong>tanpa akses jaringan</strong> dan hanya bisa melakukan hal di atas. Batalkan jika tidak memercayai sumbernya.</span>
+        </div>`;
+
     const body = `
       <div class="consent-identity">
         <div class="consent-pkg-icon" aria-hidden="true">
@@ -921,10 +930,7 @@ const Dialogs = {
       <div class="consent-perms">${permList}</div>
       ${caps.length ? `<div class="consent-section-label">Kapabilitas</div><div class="consent-caps">${caps.join('')}</div>` : ''}
       ${fingerprint}
-      <div class="consent-notice">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        <span>Plugin berjalan di sandbox <strong>tanpa akses jaringan</strong> dan hanya bisa melakukan hal di atas. Batalkan jika tidak memercayai sumbernya.</span>
-      </div>`;
+      ${noticeHtml}`;
 
     return Dialogs._create({
       title: review ? 'Setujui izin baru?' : 'Pasang plugin ini?',
@@ -955,6 +961,7 @@ function pluginFrameMain(token) {
   const needPerm = p => {
     if (!perms.has(p)) throw new Error('Izin "' + p + '" tidak diminta plugin ini di manifest.json — API terkait tidak tersedia.');
   };
+  const gated = (perm, method) => (...args) => { needPerm(perm); return callHost(method, args); };
 
   const toWasmSource = source => {
     if (source instanceof Uint8Array) return source;
@@ -999,7 +1006,7 @@ function pluginFrameMain(token) {
       },
       readBytes(ptr, len) {
         if (!Number.isInteger(ptr) || ptr < 0 || !Number.isInteger(len) || len < 0) throw new Error('ptr/len tidak valid.');
-        if (ptr + len > ex.memory.buffer.byteLength) throw new Error(' Pembacaan di luar batas memori WASM.');
+        if (ptr + len > ex.memory.buffer.byteLength) throw new Error('Pembacaan di luar batas memori WASM.');
         return new Uint8Array(ex.memory.buffer).slice(ptr, ptr + len);
       },
       readString(ptr, len) {
@@ -1076,13 +1083,13 @@ function pluginFrameMain(token) {
         get globalSettings() { return globalSettings; },
         get sharedSettings() { return sharedSettings; },
         toast: msg => callHost('toast', [msg]),
-        copy: text => { needPerm('clipboard'); return callHost('copy', [text]); },
-        copySelection: () => { needPerm('workspace'); return callHost('copySelection', []); },
-        selectRange: (from, to) => { needPerm('workspace'); return callHost('selectRange', [from, to]); },
-        clearSelection: () => { needPerm('workspace'); return callHost('clearSelection', []); },
-        getSelection: () => { needPerm('workspace'); return callHost('getSelection', []); },
-        getProject: () => { needPerm('project'); return callHost('getProject', []); },
-        getLines: () => { needPerm('project'); return callHost('getLines', []); },
+        copy: gated('clipboard', 'copy'),
+        copySelection: gated('workspace', 'copySelection'),
+        selectRange: gated('workspace', 'selectRange'),
+        clearSelection: gated('workspace', 'clearSelection'),
+        getSelection: gated('workspace', 'getSelection'),
+        getProject: gated('project', 'getProject'),
+        getLines: gated('project', 'getLines'),
         listAssets: () => callHost('listAssets', []),
         asset: path => callHost('asset', [path]),
         assetText: path => callHost('assetText', [path]),
@@ -1094,17 +1101,19 @@ function pluginFrameMain(token) {
           const res = await WebAssembly.instantiate(bytes, imp);
           return wrapWasm(res.module, res.instance, imp);
         },
-        runWasm: (source, fn, input, opts) => { needPerm('wasm'); return callHost('runWasm', [source, fn, input, opts]); },
-        pickFile: accept => { needPerm('files'); return callHost('pickFile', [accept]); },
-        download: (data, filename) => { needPerm('downloads'); return callHost('download', [data, filename]); },
+        runWasm: gated('wasm', 'runWasm'),
+        pickFile: gated('files', 'pickFile'),
+        download: gated('downloads', 'download'),
         decode: decodeBuffer,
-        saveBlob: (key, data) => { needPerm('storage'); return callHost('saveBlob', [key, data]); },
-        loadBlob: key => { needPerm('storage'); return callHost('loadBlob', [key]); },
-        deleteBlob: key => { needPerm('storage'); return callHost('deleteBlob', [key]); },
-        listBlobs: () => { needPerm('storage'); return callHost('listBlobs', []); },
-        blobExists: key => { needPerm('storage'); return callHost('blobExists', [key]); },
+        saveBlob: gated('storage', 'saveBlob'),
+        loadBlob: gated('storage', 'loadBlob'),
+        deleteBlob: gated('storage', 'deleteBlob'),
+        listBlobs: gated('storage', 'listBlobs'),
+        blobExists: gated('storage', 'blobExists'),
+        fetch: (url, opts) => { needPerm('net'); return callHost('fetch', [url, opts && typeof opts === 'object' ? opts : {}]); },
         on: (event, handler) => {
           if (typeof handler !== 'function') return () => {};
+          if ((event === 'copy' || event === 'apply') && !perms.has('hooks')) return () => {};
           if (!listeners.has(event)) listeners.set(event, new Set());
           const set = listeners.get(event);
           set.add(handler);
@@ -1284,12 +1293,19 @@ const Sandbox = {
       hasPack: false,
       panelCard: parentEl ? parentEl.closest('.plugin-panel-card') : null,
       onReady,
-      call(method, arg) {
+      call(method, arg, timeoutMs) {
         return new Promise((resolve, reject) => {
           const id = ++inst.seq;
-          inst.pending.set(id, { resolve, reject });
+          const t = setTimeout(() => {
+            inst.pending.delete(id);
+            reject(new Error(`Plugin timeout: ${method} tidak merespons dalam ${Math.round((timeoutMs ?? CALL_TIMEOUT_DEFAULT_MS) / 1000)}s.`));
+          }, timeoutMs ?? CALL_TIMEOUT_DEFAULT_MS);
+          inst.pending.set(id, {
+            resolve: v => { clearTimeout(t); resolve(v); },
+            reject: e => { clearTimeout(t); reject(e); }
+          });
           try { inst.win.postMessage({ v: 1, t: inst.token, q: 'call', id, method, arg }, '*'); }
-          catch (err) { inst.pending.delete(id); reject(err); }
+          catch (err) { clearTimeout(t); inst.pending.delete(id); reject(err); }
         });
       },
       reply(id, ok, val) {
@@ -1318,7 +1334,7 @@ const Sandbox = {
         sharedSettings: Runtime.sharedValuesFor(meta),
         permissions: meta.permissions,
         jszip: meta.permissions.includes('jszip') ? jszipSrc : null
-      });
+      }, BOOT_TIMEOUT_MS);
       inst.info = info;
       inst.theme = info.theme;
       inst.cmdMeta = info.commands || [];
@@ -1341,6 +1357,200 @@ const Sandbox = {
     const kill = () => { if (!killed) { killed = true; try { inst.frame.remove(); } catch {} } };
     setTimeout(kill, 300);
     inst.call('deactivate', {}).then(kill, kill);
+  }
+};
+
+const Downloads = {
+  _el: null,
+  _hostEl: null,
+  _bytesEl: null,
+  _fillEl: null,
+  _timer: null,
+  _active: false,
+
+  _ensure() {
+    if (Downloads._el) return;
+    const el = document.createElement('div');
+    el.className = 'net-progress';
+    el.innerHTML = '<div class="np-row"><div class="np-spin"></div><div class="np-text"><div class="np-host"></div><div class="np-bytes"></div></div></div><div class="np-bar"><div class="np-fill"></div></div>';
+    document.body.appendChild(el);
+    Downloads._el = el;
+    Downloads._hostEl = el.querySelector('.np-host');
+    Downloads._bytesEl = el.querySelector('.np-bytes');
+    Downloads._fillEl = el.querySelector('.np-fill');
+  },
+
+  _fmt(n) { return humanBytes(n); },
+
+  start(host, total) {
+    Downloads._ensure();
+    if (Downloads._timer) clearTimeout(Downloads._timer);
+    Downloads._timer = setTimeout(() => {
+      Downloads._timer = null;
+      Downloads._active = true;
+      Downloads._hostEl.textContent = host || 'mengunduh';
+      Downloads._bytesEl.textContent = total ? '0 / ' + Downloads._fmt(total) : '0 B';
+      Downloads._fillEl.style.width = total ? '0%' : '35%';
+      Downloads._fillEl.classList.toggle('determinate', !!total);
+      Downloads._el.classList.add('open');
+    }, 350);
+  },
+
+  progress(received, total) {
+    if (!Downloads._active) return;
+    if (total) {
+      Downloads._bytesEl.textContent = Downloads._fmt(received) + ' / ' + Downloads._fmt(total);
+      Downloads._fillEl.style.width = Math.min(100, (received / total) * 100) + '%';
+    } else {
+      Downloads._bytesEl.textContent = Downloads._fmt(received);
+    }
+  },
+
+  end() {
+    if (Downloads._timer) { clearTimeout(Downloads._timer); Downloads._timer = null; return; }
+    if (!Downloads._active) return;
+    Downloads._active = false;
+    if (Downloads._el) Downloads._el.classList.remove('open');
+  }
+};
+
+const NetRunner = {
+  _isPrivateHost(h) {
+    if (!h) return true;
+    const s = h.toLowerCase().replace(/^\[|\]$/g, '');
+    if (s === 'localhost' || s.endsWith('.localhost')) return true;
+    if (s === '0.0.0.0' || s === '::' || s === '::1' || s === '0000:0000:0000:0000:0000:0000:0000:0001') return true;
+    let m = s.match(/^::ffff:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (m) return NetRunner._isPrivateHost(`${m[1]}.${m[2]}.${m[3]}.${m[4]}`);
+    if (/^::ffff:/.test(s) || /^::ffff:0:/.test(s)) return true;
+    m = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (m) {
+      const a = +m[1], b = +m[2];
+      if (a === 0 || a === 10 || a === 127 || a >= 240) return true;
+      if (a === 169 && b === 254) return true;
+      if (a === 172 && b >= 16 && b <= 31) return true;
+      if (a === 192 && b === 168) return true;
+      if (a === 100 && b >= 64 && b <= 127) return true;
+      return false;
+    }
+    if (/^fe[89ab][0-9a-f]:/.test(s)) return true;
+    if (/^fd[0-9a-f]{2}:/.test(s)) return true;
+    if (/^64:ff9b:1?:/.test(s)) return true;
+    return false;
+  },
+
+  _validateUrl(raw) {
+    if (typeof raw !== 'string' || !raw) throw new Error('URL tidak valid.');
+    let u;
+    try { u = new URL(raw); } catch { throw new Error('URL tidak valid.'); }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('Hanya http/https diperbolehkan.');
+    if (NetRunner._isPrivateHost(u.hostname)) throw new Error('Host lokal/private tidak diperbolehkan.');
+    return u;
+  },
+
+  _normalizeHeaders(raw) {
+    const out = {};
+    if (!isPlainObject(raw)) return out;
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof k !== 'string' || !k) continue;
+      const lk = k.toLowerCase();
+      if (lk === 'host' || lk === 'content-length' || lk === 'connection' || lk === 'cookie' || lk === 'set-cookie' || lk === 'upgrade' || lk === 'te' || lk === 'trailer' || lk === 'transfer-encoding') continue;
+      out[k] = String(v).slice(0, 8192);
+    }
+    return out;
+  },
+
+  _normalizeBody(raw) {
+    if (raw == null) return null;
+    if (typeof raw === 'string') return raw;
+    if (raw instanceof Uint8Array) return raw;
+    if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+    if (isPlainObject(raw)) return JSON.stringify(raw);
+    throw new Error('Body harus string, Uint8Array, ArrayBuffer, atau objek.');
+  },
+
+  _timeout(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 1000) return NET_TIMEOUT_DEFAULT_MS;
+    return Math.round(n);
+  },
+
+  _rangeHeader(range) {
+    if (range == null) return null;
+    if (typeof range === 'string') {
+      const s = range.trim();
+      if (!s) return null;
+      return s.startsWith('bytes=') ? s : 'bytes=' + s;
+    }
+    if (Array.isArray(range)) {
+      const a = Number(range[0]);
+      const b = Number(range[1]);
+      if (!Number.isFinite(a) || a < 0) throw new Error('Range tidak valid.');
+      if (range.length < 2 || !Number.isFinite(b)) return 'bytes=' + Math.round(a) + '-';
+      if (b < a) throw new Error('Range tidak valid.');
+      return 'bytes=' + Math.round(a) + '-' + Math.round(b);
+    }
+    throw new Error('Range tidak valid.');
+  },
+
+  async fetch(rawUrl, opts) {
+    const o = isPlainObject(opts) ? opts : {};
+    const u = NetRunner._validateUrl(rawUrl);
+    const method = (typeof o.method === 'string' ? o.method : 'GET').toUpperCase();
+    if (!NET_METHODS.has(method)) throw new Error('Metode tidak didukung.');
+    const headers = NetRunner._normalizeHeaders(o.headers);
+    const rangeH = NetRunner._rangeHeader(o.range);
+    if (rangeH) headers.Range = rangeH;
+    const body = NetRunner._normalizeBody(o.body);
+    const as = o.as === 'bytes' ? 'bytes' : 'text';
+    const silent = !!o.silent;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), NetRunner._timeout(o.timeoutMs));
+    let res;
+    try {
+      res = await fetch(u.href, { method, headers, body, signal: ctrl.signal, redirect: 'follow', credentials: 'omit', cache: 'no-store', referrer: '', referrerPolicy: 'no-referrer' });
+    } catch (err) {
+      clearTimeout(timer);
+      throw new Error('Permintaan gagal: ' + (err?.name === 'AbortError' ? 'timeout' : (err?.message || String(err))));
+    }
+    clearTimeout(timer);
+    NetRunner._validateUrl(res.url);
+    const headersOut = {};
+    res.headers.forEach((v, k) => { headersOut[k] = v; });
+    const total = Number(res.headers.get('content-length') || 0) || null;
+    const showProgress = !silent && (total == null || total >= 100 * 1024);
+    if (showProgress) Downloads.start(u.hostname, total);
+    let received = 0;
+    let buf;
+    try {
+      const reader = res.body?.getReader();
+      if (reader) {
+        const chunks = [];
+        while (true) {
+          const r = await reader.read();
+          if (r.done) break;
+          if (r.value) {
+            chunks.push(r.value);
+            received += r.value.length;
+            if (showProgress) Downloads.progress(received, total);
+          }
+        }
+        buf = new Uint8Array(received);
+        let off = 0;
+        for (const c of chunks) { buf.set(c, off); off += c.length; }
+      } else {
+        buf = new Uint8Array(await res.arrayBuffer());
+      }
+    } catch (err) {
+      ctrl.abort();
+      if (showProgress) Downloads.end();
+      throw new Error('Stream terputus: ' + (err?.message || String(err)));
+    }
+    if (showProgress) Downloads.end();
+    if (as === 'bytes') {
+      return { ok: res.ok, status: res.status, statusText: res.statusText, url: res.url, headers: headersOut, body: buf };
+    }
+    return { ok: res.ok, status: res.status, statusText: res.statusText, url: res.url, headers: headersOut, body: new TextDecoder('utf-8').decode(buf) };
   }
 };
 
@@ -1460,7 +1670,6 @@ const Runtime = {
   _styleEl: null,
   _lastThemeCss: null,
   _sigCache: new WeakMap(),
-  _store: {},
 
   listMeta() { return Runtime._index.slice(); },
   getMeta(id) { return Runtime._index.find(p => p.id === id) || null; },
@@ -1701,7 +1910,7 @@ const Runtime = {
 
     host.util.progress.show('Memeriksa paket plugin...', 'Membaca manifest.json...');
 
-    let manifest, meta, zip;
+    let meta, zip;
     try {
       zip = await ZipReader.open(file).catch(() => { throw new Error('File .zip tidak valid atau rusak.'); });
       if (!zip.has(MANIFEST_FILE)) {
@@ -1785,10 +1994,10 @@ const Runtime = {
     Runtime._deactivate(id);
     for (const p of linked) {
       try {
-        const data = await host.storage.loadProject?.(p.id);
+        const data = await host.storage.loadProject(p.id);
         if (data && !data.pluginName) {
           data.pluginName = meta.name;
-          await host.storage.saveProject?.(p.id, data);
+          await host.storage.saveProject(p.id, data);
         }
       } catch {}
     }
@@ -1825,7 +2034,6 @@ const Runtime = {
       }
       return fn(...args);
     };
-    const toU8 = v => (v instanceof Uint8Array ? v : v instanceof ArrayBuffer ? new Uint8Array(v) : null);
 
     return {
       toast: msg => {
@@ -1878,6 +2086,10 @@ const Runtime = {
         if (!validBlobKey(key)) return false;
         if (!host.state.projectId()) return false;
         return host.storage.blobExists(inst.meta.id, key);
+      }),
+      fetch: gate('net', (url, opts) => {
+        if (!Runtime._rateOk(inst.meta.id, 'fetch', RATE_FETCH_PER_MIN)) throw new Error('Terlalu banyak permintaan jaringan — coba lagi sebentar lagi.');
+        return NetRunner.fetch(url, opts);
       })
     };
   },
@@ -2036,7 +2248,7 @@ const Runtime = {
     const inst = Runtime._instances.get(meta.id);
     if (!inst) throw new Error(`Plugin "${meta.name}" tidak aktif.`);
     if (!inst.hasExtract) throw new Error(`Plugin "${meta.name}" tidak mendukung extract.`);
-    const out = await inst.call('extract', { fileName: input.fileName, buffer: input.buffer, settings: input.settings });
+    const out = await inst.call('extract', { fileName: input.fileName, buffer: input.buffer }, 120000);
     if (!out || !Array.isArray(out.lines)) throw new Error(`Plugin "${meta.name}" tidak mengembalikan lines array.`);
     return out;
   },
@@ -2045,7 +2257,7 @@ const Runtime = {
     const inst = Runtime._instances.get(meta.id);
     if (!inst) throw new Error(`Plugin "${meta.name}" tidak aktif.`);
     if (!inst.hasPack) throw new Error(`Plugin "${meta.name}" tidak mendukung pack.`);
-    const out = await inst.call('pack', { lines: input.lines, sourceMap: input.sourceMap, projectName: input.projectName });
+    const out = await inst.call('pack', { lines: input.lines, sourceMap: input.sourceMap, projectName: input.projectName }, 120000);
     if (!out || !(out.blob instanceof Blob)) throw new Error(`Plugin "${meta.name}" tidak mengembalikan blob yang valid.`);
     return out;
   },
@@ -2111,15 +2323,15 @@ let ui = null;
 const PluginUI = {
 
   bind() {
-    ui.btnPluginManagerOpen?.addEventListener('click', PluginUI.openManager);
-    ui.btnPluginManagerClose?.addEventListener('click', PluginUI.closeManager);
-    ui.btnPluginRefresh?.addEventListener('click', async () => {
+    ui.btnPluginManagerOpen.addEventListener('click', PluginUI.openManager);
+    ui.btnPluginManagerClose.addEventListener('click', PluginUI.closeManager);
+    ui.btnPluginRefresh.addEventListener('click', async () => {
       await Runtime.sync();
       PluginUI.renderList();
       host.ui.flash('Daftar plugin dimuat ulang.');
     });
-    ui.btnInstallPlugin?.addEventListener('click', () => ui.pluginFileInput?.click());
-    ui.pluginFileInput?.addEventListener('change', async e => {
+    ui.btnInstallPlugin.addEventListener('click', () => ui.pluginFileInput.click());
+    ui.pluginFileInput.addEventListener('change', async e => {
       if (!e.target.files.length) { e.target.value = ''; return; }
       await PluginUI.installFlow(e.target.files[0]);
       e.target.value = '';
@@ -2150,8 +2362,8 @@ const PluginUI = {
       });
     }
 
-    ui.btnOpenPlugins?.addEventListener('click', () => PluginUI.renderMenu());
-    ui.pluginMenu?.addEventListener('click', e => {
+    ui.btnOpenPlugins.addEventListener('click', () => PluginUI.renderMenu());
+    ui.pluginMenu.addEventListener('click', e => {
       const setBtn = e.target.closest('[data-plugin-settings]');
       if (setBtn) {
         host.ui.closeDropdowns();
@@ -2168,12 +2380,12 @@ const PluginUI = {
 
   async openManager() {
     await Runtime.sync();
-    ui.pluginManagerModal?.classList.add('open');
+    ui.pluginManagerModal.classList.add('open');
     PluginUI.renderList();
   },
 
   closeManager() {
-    ui.pluginManagerModal?.classList.remove('open');
+    ui.pluginManagerModal.classList.remove('open');
     host.ui.loadDashboard();
   },
 

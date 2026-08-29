@@ -206,7 +206,7 @@ async function withProgress(title, initialMsg, fn, failMsg) {
   });
   Progress.hide();
   if (err) {
-    if (els.copyStatus) els.copyStatus.classList.add('empty');
+    els.copyStatus.classList.add('empty');
     const msg = err?.storage ? err.message : (failMsg ? failMsg(err) : err.message);
     setTimeout(() => alert(msg), 10);
     if (err?.storage) App.loadDashboard();
@@ -223,14 +223,11 @@ function isStorageError(e) {
 }
 
 function storageFailure(e, noun) {
-  const n = e?.name;
   const err = new Error();
   err.storage = true;
+  const n = e?.name;
   if (n === 'NotFoundError') {
-    err.missing = true;
     err.message = (noun ? 'File ' + noun : 'Data') + ' tidak ditemukan di penyimpanan — mungkin sudah dihapus atau data situs dibersihkan. Daftar akan dimuat ulang.';
-  } else if (n === 'SecurityError') {
-    err.message = 'Browser menolak akses penyimpanan. Tutup lalu buka kembali aplikasi, lalu coba lagi.';
   } else if (n === 'NoModificationAllowedError') {
     err.message = 'File sedang dipakai proses lain — tunggu sebentar lalu coba lagi.';
   } else {
@@ -257,7 +254,7 @@ const Storage = {
   invalidateRoot() {
     const p = Storage._rootPromise;
     Storage._rootPromise = null;
-    if (p && typeof p.catch === 'function') p.catch(() => {});
+    if (p) p.catch(() => {});
   },
   async _withRootRetry(fn, noun) {
     let lastErr = null;
@@ -342,9 +339,6 @@ const Storage = {
   },
   readIndex() {
     return Storage._withRootRetry(root => Storage._readIndexFrom(root));
-  },
-  writeIndex(items) {
-    return Storage._queued(() => Storage._withRootRetry(root => Storage._writeFile(root, INDEX_FILE, JSON.stringify(items))));
   },
   upsertIndex(meta) {
     return Storage._queued(() => Storage._withRootRetry(async root => {
@@ -674,28 +668,18 @@ const OpfsExplorer = {
     })[kind] || 'File';
   },
   kindIconSvg(kind, isDir) {
-    if (isDir) {
-      return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
-    }
-    if (kind === 'project') {
-      return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>';
-    }
-    if (kind === 'epub') {
-      return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>';
-    }
-    if (kind === 'plugin') {
-      return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h4.5a2.5 2.5 0 1 1 5 0H19v4.5a2.5 2.5 0 1 1 0 5V19h-4.5a2.5 2.5 0 1 0-5 0H5v-4.5a2.5 2.5 0 1 0 0-5z"/></svg>';
-    }
-    if (kind === 'index') {
-      return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>';
-    }
-    if (kind === 'data') {
-      return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>';
-    }
-    if (kind === 'tmp') {
-      return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
-    }
-    return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
+    const SVG = (path) => '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + path + '</svg>';
+    const M = {
+      folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+      project: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/>',
+      epub: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
+      plugin: '<path d="M5 5h4.5a2.5 2.5 0 1 1 5 0H19v4.5a2.5 2.5 0 1 1 0 5V19h-4.5a2.5 2.5 0 1 0-5 0H5v-4.5a2.5 2.5 0 1 0 0-5z"/>',
+      index: '<path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/>',
+      data: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
+      tmp: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+      other: '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>'
+    };
+    return SVG(M[isDir ? 'folder' : kind] || M.other);
   },
   formatSize(bytes) {
     if (bytes == null || isNaN(bytes)) return '?';
@@ -750,18 +734,15 @@ const OpfsExplorer = {
     return out;
   },
   _showLoading(show) {
-    if (!els.opfsLoading) return;
     els.opfsLoading.hidden = !show;
   },
   _showEmpty(show) {
-    if (!els.opfsEmpty) return;
-    if (show && els.opfsEmptyText) {
+    if (show) {
       els.opfsEmptyText.textContent = this.path.length ? 'Folder ini kosong.' : 'Belum ada file di OPFS.';
     }
     els.opfsEmpty.hidden = !show;
   },
   _renderCrumbs() {
-    if (!els.opfsCrumbs) return;
     els.opfsCrumbs.hidden = !this.path.length;
     els.opfsCrumbs.innerHTML = '';
     if (!this.path.length) return;
@@ -788,7 +769,6 @@ const OpfsExplorer = {
     els.opfsCrumbs.appendChild(frag);
   },
   async refresh() {
-    if (!els.opfsList) return;
     if (!navigator.storage?.getDirectory) {
       els.opfsList.innerHTML = '';
       this._showEmpty(false);
@@ -821,7 +801,7 @@ const OpfsExplorer = {
       els.opfsList.innerHTML = '';
       if (e?.name === 'NotFoundError') {
         this.path = [];
-        if (els.opfsCrumbs) els.opfsCrumbs.hidden = true;
+        els.opfsCrumbs.hidden = true;
       }
       const notice = document.createElement('div');
       notice.className = 'opfs-error';
@@ -904,9 +884,9 @@ const OpfsExplorer = {
     try {
       const dir = await this.dirHandle(this.path);
       await dir.removeEntry(name, { recursive: !!isDir });
-      const row = els.opfsList?.querySelector(`.opfs-item[data-name="${CSS.escape(name)}"]`);
+      const row = els.opfsList.querySelector(`.opfs-item[data-name="${CSS.escape(name)}"]`);
       if (row) row.remove();
-      if (els.opfsList && !els.opfsList.children.length) {
+      if (!els.opfsList.children.length) {
         this._showEmpty(true);
       }
       if (kind === 'plugin' && name !== PLUGINS_FILE) await CSTL.plugins.sync();
@@ -1057,9 +1037,10 @@ const EpubImages = {
 function parseJsonArray(arr, file, start) {
   if (!Array.isArray(arr)) throw new Error(`File ${file} bukan array JSON.`);
   const out = [];
+  let skipped = 0;
   let n = start;
   for (const e of arr) {
-    if (!e || typeof e !== 'object' || !Object.hasOwn(e, 'message')) continue;
+    if (!e || typeof e !== 'object' || !Object.hasOwn(e, 'message')) { skipped++; continue; }
     out.push({
       line_num: n++,
       file,
@@ -1070,13 +1051,14 @@ function parseJsonArray(arr, file, start) {
       is_translated: false
     });
   }
-  return out;
+  return { lines: out, skipped };
 }
 
 async function parseFilesList(files, existing, start, onProgress, label = 'file') {
   existing = new Set(existing || []);
   const imported = [];
   const skipped = [];
+  let invalidEntries = 0;
   let cur = start;
   const sorted = files.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
   for (let i = 0; i < sorted.length; i++) {
@@ -1085,11 +1067,12 @@ async function parseFilesList(files, existing, start, onProgress, label = 'file'
     if (existing.has(bn)) { skipped.push(bn); continue; }
     const arr = JSON.parse(decodeBuffer(f.buffer));
     const parsed = parseJsonArray(arr, bn, cur);
-    if (parsed.length) { existing.add(bn); imported.push(...parsed); cur += parsed.length; }
+    if (parsed.lines.length) { existing.add(bn); imported.push(...parsed.lines); cur += parsed.lines.length; }
+    invalidEntries += parsed.skipped;
     onProgress(`${i + 1} / ${sorted.length} ${label}`, ((i + 1) / sorted.length) * 100);
     if (i % 50 === 0) await yieldToEvent();
   }
-  return { imported, skipped, nextStart: cur, existing: Array.from(existing) };
+  return { imported, skipped, invalidEntries, nextStart: cur, existing: Array.from(existing) };
 }
 
 async function parseZipJson(buffer, existing, start, onProgress) {
@@ -1242,11 +1225,6 @@ async function buildExportEpub(epubId, lines, tags, projectName, onProgress) {
 function buildProjectZipInner(zip, data) {
   const meta = { ...data };
   delete meta.lines;
-  delete meta.proofreadScope;
-  delete meta.proofreadRegex;
-  delete meta.proofreadCaseSensitive;
-  delete meta.proofreadExactMatch;
-  delete meta.proofreadTranslatedOnly;
   zip.file('metadata.json', JSON.stringify(meta));
 
   const fileLines = new Map();
@@ -1287,19 +1265,26 @@ async function buildBackup(id, name, onProgress) {
   if (!jsZipReady()) throw new Error('JSZip tidak tersedia.');
   const data = await Storage.load(id);
   let epubBuffer = null;
+  let epubMissing = false;
   if (data.projectType === 'epub' && data.epubSourceId) {
-    try { epubBuffer = await Storage.loadEpubBuffer(data.epubSourceId); } catch {}
+    try { epubBuffer = await Storage.loadEpubBuffer(data.epubSourceId); }
+    catch { epubMissing = true; }
   }
   const zip = new JSZip();
   buildProjectZipInner(zip, data);
   if (epubBuffer) zip.file(data.epubSourceId, epubBuffer);
   const blobs = await Storage.listAllBlobs(id);
+  let blobsMissing = 0;
   for (const b of blobs) {
-    try { zip.file(`${BLOBS_DIR}/${b.pluginId}/${b.key}`, await b.handle.getFile()); } catch {}
+    try { zip.file(`${BLOBS_DIR}/${b.pluginId}/${b.key}`, await b.handle.getFile()); }
+    catch { blobsMissing++; }
   }
   onProgress('Mengompres backup...', 90);
   const blob = await compressZip(zip, 'application/octet-stream');
-  return { blob, name: `${sanitizeName(name)}_backup.cstl` };
+  const warnings = [];
+  if (epubMissing) warnings.push('EPUB sumber tidak ikut di-backup (mungkin sudah hilang).');
+  if (blobsMissing) warnings.push(`${blobsMissing} blob plugin gagal dibaca dan tidak ikut.`);
+  return { blob, name: `${sanitizeName(name)}_backup.cstl`, warnings };
 }
 
 async function backupAll(onProgress) {
@@ -1309,6 +1294,7 @@ async function backupAll(onProgress) {
   const total = items.length;
   const outer = new JSZip();
   const used = new Set();
+  const warnings = [];
   onProgress(`0 / ${total} project`, 0);
   for (let i = 0; i < total; i++) {
     onProgress(`Memproses ${i + 1} / ${total} project`, (i / total) * 95);
@@ -1316,24 +1302,26 @@ async function backupAll(onProgress) {
     const zip = new JSZip();
     buildProjectZipInner(zip, data);
     if (data.projectType === 'epub' && data.epubSourceId) {
-      try { zip.file(data.epubSourceId, await Storage.loadEpubBuffer(data.epubSourceId)); } catch {}
+      try { zip.file(data.epubSourceId, await Storage.loadEpubBuffer(data.epubSourceId)); }
+      catch { warnings.push(`${data.projectName}: EPUB sumber tidak ikut.`); }
     }
     const blobs = await Storage.listAllBlobs(items[i].id);
     for (const b of blobs) {
-      try { zip.file(`${BLOBS_DIR}/${b.pluginId}/${b.key}`, await b.handle.getFile()); } catch {}
+      try { zip.file(`${BLOBS_DIR}/${b.pluginId}/${b.key}`, await b.handle.getFile()); }
+      catch { warnings.push(`${data.projectName}: blob ${b.pluginId}/${b.key} tidak ikut.`); }
     }
     const blob = await compressZip(zip, '', 9);
     const base = sanitizeName(data.projectName);
-    let name = base, k = 2;
-    while (used.has(name)) name = `${base}_${k++}`;
-    used.add(name);
-    outer.file(`${name}_backup.cstl`, blob);
+    let nm = base, k = 2;
+    while (used.has(nm)) nm = `${base}_${k++}`;
+    used.add(nm);
+    outer.file(`${nm}_backup.cstl`, blob);
     onProgress(`${i + 1} / ${total} project selesai`, ((i + 1) / total) * 95);
     await yieldToEvent();
   }
   onProgress('Mengompres arsip utama...', 98);
   const blob = await compressZip(outer, 'application/octet-stream');
-  return { blob, name: `ProjectBackupAll_${new Date().toISOString().slice(0, 10)}.cstl` };
+  return { blob, name: `ProjectBackupAll_${new Date().toISOString().slice(0, 10)}.cstl`, warnings };
 }
 
 async function restoreOne(zip, fallbackName, onProgress) {
@@ -1387,7 +1375,7 @@ async function restoreOne(zip, fallbackName, onProgress) {
   if (meta.projectType === 'epub' && meta.epubSourceId) {
     const entry = zip.file(meta.epubSourceId);
     if (entry) {
-      const newId = 'epub_' + Date.now() + '.epub';
+      const newId = makeEpubId();
       await Storage.saveEpub(newId, await entry.async('arraybuffer'));
       meta.epubSourceId = newId;
     }
@@ -1429,6 +1417,7 @@ async function restoreOne(zip, fallbackName, onProgress) {
 
 async function restoreBlobsFromZip(zip, projectId) {
   const prefix = BLOBS_DIR + '/';
+  let restored = 0, failed = 0;
   for (const entry of Object.values(zip.files)) {
     if (entry.dir || !entry.name.startsWith(prefix)) continue;
     const path = entry.name.slice(prefix.length);
@@ -1437,8 +1426,10 @@ async function restoreBlobsFromZip(zip, projectId) {
     const pluginId = path.slice(0, slash);
     const key = path.slice(slash + 1);
     if (!pluginId || /[\\\/]/.test(pluginId) || !validBlobKey(key)) continue;
-    try { await Storage.saveBlob(projectId, pluginId, key, await entry.async('blob')); } catch {}
+    try { await Storage.saveBlob(projectId, pluginId, key, await entry.async('blob')); restored++; }
+    catch { failed++; }
   }
+  return { restored, failed };
 }
 
 async function parseRestore(buffer, fallbackName, onProgress) {
@@ -1459,7 +1450,8 @@ async function parseRestore(buffer, fallbackName, onProgress) {
   if (!entries.length) throw new Error('Format arsip tidak valid.');
 
   const totalEntries = entries.length;
-  let ok = 0, fail = 0;
+  const errors = [];
+  let ok = 0;
   for (let i = 0; i < totalEntries; i++) {
     const entry = entries[i];
     try {
@@ -1467,13 +1459,13 @@ async function parseRestore(buffer, fallbackName, onProgress) {
       await inner.loadAsync(await entry.async('blob'));
       await restoreOne(inner, entry.name.replace(/\.cstl$/i, ''));
       ok++;
-    } catch {
-      fail++;
+    } catch (e) {
+      errors.push({ name: entry.name, message: e?.message || String(e) });
     }
     onProgress(`${i + 1} / ${totalEntries} project`, ((i + 1) / totalEntries) * 100);
     await yieldToEvent();
   }
-  return { single: false, ok, fail };
+  return { single: false, ok, fail: errors.length, errors };
 }
 
 function buildRe(query, regex, exact, caseSensitive) {
@@ -1589,7 +1581,7 @@ const SHORTCUT_ACTIONS = [
   { id: 'dash.new', label: 'Buat Project Baru', scope: 'dashboard', def: '', run: () => els.btnNewProject.click() },
   { id: 'dash.restore', label: 'Pulihkan Project', scope: 'dashboard', def: '', run: () => els.btnRestoreProject.click() },
   { id: 'dash.settings', label: 'Buka Pengaturan Utama', scope: 'dashboard', def: '', run: () => els.btnDashboardSettings.click() },
-  { id: 'dash.search', label: 'Fokus Cari Project', scope: 'dashboard', def: '/', run: () => els.projectSearch?.focus() },
+  { id: 'dash.search', label: 'Fokus Cari Project', scope: 'dashboard', def: '/', run: () => els.projectSearch.focus() },
   { id: 'work.importFile', label: 'Import File', scope: 'workspace', def: '', run: () => { closeDropdowns(); els.importFileInput.click(); } },
   { id: 'work.importFolder', label: 'Import Folder', scope: 'workspace', def: '', run: () => { closeDropdowns(); els.importFolderInput.click(); } },
   { id: 'work.importZip', label: 'Import ZIP', scope: 'workspace', def: '', run: () => { closeDropdowns(); els.importZipInput.click(); } },
@@ -1716,14 +1708,14 @@ const Shortcuts = {
       run: () => CSTL.plugins.runCommand(c.id)
     }));
     Shortcuts.rebuild();
-    if (els?.shortcutModal?.classList.contains('open')) App.renderShortcutList();
+    if (els.shortcutModal.classList.contains('open')) App.renderShortcutList();
   },
 
   _onKey(e) {
     if (e.isComposing || e.keyCode === 229) return;
     if (Shortcuts._recording) return;
     if (anyModalOpen()) return;
-    if (els.busyOverlay?.classList.contains('open')) return;
+    if (els.busyOverlay.classList.contains('open')) return;
     const combo = comboFromEvent(e);
     if (!combo) return;
     const actionId = Shortcuts._map.get(combo);
@@ -1806,7 +1798,7 @@ function cacheEls() {
     'btnBackupAll', 'btnWipeAllData',
     'btnBackToDashboard', 'projectNameDisplay', 'dynamicToolbarWrap',
     'workspaceToolbar', 'btnToggleHeader', 'btnShowHeader',
-    'btnImportMain', 'importDropdown', 'importGroup',
+    'btnImportMain', 'importDropdown',
     'btnImportFile', 'btnImportFolder', 'btnImportZip',
     'importFileInput', 'importFolderInput', 'importZipInput', 'restoreProjectInput',
     'btnExport', 'btnProofread', 'btnGlossary', 'btnContext', 'btnSettings',
@@ -1815,7 +1807,7 @@ function cacheEls() {
     'rangeFromInput', 'rangeToInput', 'btnSelectRange', 'btnClearSelection', 'btnSelectAll', 'btnCopyForAi',
     'copyStatus', 'pasteArea', 'btnUndo', 'btnApply', 'btnRedo',
     'nameTotalCount', 'nameTableBody',
-    'btnCopyAllNames', 'copyNamesDropdown', 'copyNamesGroup',
+    'btnCopyAllNames', 'copyNamesDropdown',
     'btnCopyNamesPlain', 'btnCopyNamesWithGlossary', 'btnCopyNamesMissingGlossary',
     'settingsModal', 'btnSettingsDasarReset', 'settingsIgnoreNameCheck', 'settingsPromptCheck',
     'settingsJumpToContextCheck', 'settingsHideToolsCheck',
@@ -1835,33 +1827,26 @@ function cacheEls() {
     'btnProofreadReset', 'proofreadReplaceInput', 'btnProofreadReplaceAll',
     'proofreadStatus', 'proofreadContainer', 'btnProofreadClose',
     'dashboardSettingsModal', 'shortcutModal', 'shortcutStatus', 'shortcutList', 'btnShortcutsOpen', 'btnShortcutsClose', 'btnShortcutsResetAll',
-    'btnPluginManagerOpen',
-    'pluginManagerModal', 'btnPluginManagerClose', 'btnPluginRefresh',
-    'pluginList', 'btnInstallPlugin', 'pluginFileInput', 'btnOpenPlugins', 'pluginMenu',
+    'btnOpenPlugins', 'pluginMenu',
     'opfsExplorerModal', 'btnOpfsExplorerOpen', 'btnOpfsExplorerClose',
-    'opfsExplorer', 'opfsList', 'opfsEmpty', 'opfsEmptyText', 'opfsCrumbs', 'opfsLoading', 'btnOpfsRefresh',
+    'opfsList', 'opfsEmpty', 'opfsEmptyText', 'opfsCrumbs', 'opfsLoading', 'btnOpfsRefresh',
     'busyOverlay', 'busyTitle', 'busyMsg', 'busyBarFill',
-    'bookmarkDock', 'btnBookmarks', 'bookmarkPanel',
+    'btnBookmarks', 'bookmarkPanel',
     'bookmarkPanelCount', 'bookmarkList', 'btnBookmarkClear'
   ];
   for (const id of ids) els[id] = $(id);
 }
 
 const Progress = {
-  show(title, msg = '') {
+  _open(title, msg, determinate) {
     els.busyTitle.textContent = title;
     els.busyMsg.textContent = msg;
-    els.busyBarFill.classList.remove('determinate');
-    els.busyBarFill.style.width = '';
+    els.busyBarFill.classList.toggle('determinate', determinate);
+    els.busyBarFill.style.width = determinate ? '0%' : '';
     els.busyOverlay.classList.add('open');
   },
-  determinate(title, msg = '') {
-    els.busyTitle.textContent = title;
-    els.busyMsg.textContent = msg;
-    els.busyBarFill.classList.add('determinate');
-    els.busyBarFill.style.width = '0%';
-    els.busyOverlay.classList.add('open');
-  },
+  show(title, msg = '') { Progress._open(title, msg, false); },
+  determinate(title, msg = '') { Progress._open(title, msg, true); },
   update(msg, pct) {
     if (msg !== undefined && typeof msg === 'string') els.busyMsg.textContent = msg;
     if (pct !== undefined && els.busyBarFill.classList.contains('determinate')) {
@@ -1900,6 +1885,9 @@ State.toData = () => {
   }
   return data;
 };
+
+State.maxLineNum = () => State.lines.reduce((m, l) => Math.max(m, l.line_num), 0);
+State.nextLineNum = () => State.lines.length ? State.maxLineNum() + 1 : 1;
 
 State.loadFromData = (data) => {
   State.files = data.imported_files || [];
@@ -2010,7 +1998,10 @@ State.queueSave = () => {
           translatedCount: State.translatedCount
         });
         App.flashSaved();
-      } catch {}
+      } catch (e) {
+        if (e?.storage) { App.flash('Gagal menyimpan: ' + e.message, true); }
+        else { console.error('[autosave]', e); }
+      }
     });
   }, 500);
 };
@@ -2217,7 +2208,6 @@ function positionDropdown(panelId) {
   const triggerMap = { importDropdown: 'btnImportMain', copyNamesDropdown: 'btnCopyAllNames', pluginMenu: 'btnOpenPlugins' };
   const trigger = els[triggerMap[panelId]];
   const dropdown = els[panelId];
-  if (!trigger || !dropdown) return;
   const r = trigger.getBoundingClientRect();
   if (dropdown.classList.contains('dropdown-right')) {
     dropdown.style.left = '';
@@ -2230,7 +2220,7 @@ function positionDropdown(panelId) {
 }
 
 function closeDropdowns() {
-  for (const { panel } of DROPDOWNS) els[panel]?.classList.remove('show');
+  for (const { panel } of DROPDOWNS) els[panel].classList.remove('show');
 }
 
 function toggleModal(el, show) {
@@ -2283,7 +2273,7 @@ const Importer = {
     if (!meta) throw new Error(`Tidak ada plugin aktif yang menangani file "${first.name}".`);
     if (!Importer.assertPluginProjectType(meta)) return null;
     const settings = CSTL.plugins.valuesFor(meta);
-    const startNum = State.lines.length ? State.lines.reduce((m, l) => Math.max(m, l.line_num), 0) + 1 : 1;
+    const startNum = State.nextLineNum();
     const existing = new Set(State.files);
     const imported = [];
     const images = [];
@@ -2332,7 +2322,7 @@ const Importer = {
 
   async process(input, isZip = false) {
     await withProgress('Memproses file...', 'Mempersiapkan...', async () => {
-      const startNum = State.lines.length ? State.lines.reduce((m, l) => Math.max(m, l.line_num), 0) + 1 : 1;
+      const startNum = State.nextLineNum();
       const existing = new Set(State.files);
       let result;
 
@@ -2417,15 +2407,20 @@ const Importer = {
         State.namesDirty = true;
         App.refresh(true);
         State.queueSave();
-        App.flash(`Berhasil impor ${result.imported.length} baris.${result.skipped.length ? ` (${result.skipped.length} file duplikat diabaikan)` : ''}`);
+        const invalidNote = result.invalidEntries ? ` (${result.invalidEntries} entri tanpa \`message\` diabaikan)` : '';
+        const skipNote = result.skipped.length ? ` (${result.skipped.length} file duplikat diabaikan)` : '';
+        App.flash(`Berhasil impor ${result.imported.length} baris.${skipNote}${invalidNote}`);
         CSTL.plugins.emit('import', { lineCount: result.imported.length, fileCount: (result.existing || existing).length });
       } else if (result.skipped.length) {
         els.copyStatus.classList.add('empty');
         setTimeout(() => alert(`Gagal impor: File duplikat.\n- ${result.skipped.slice(0, 5).join('\n- ')}`), 10);
+      } else if (result.invalidEntries) {
+        els.copyStatus.classList.add('empty');
+        setTimeout(() => alert(`Tidak ada baris valid yang dapat diimpor. ${result.invalidEntries} entri tidak memiliki field "message".`), 10);
       } else {
         App.flash('Tidak ada data valid.', false);
       }
-    }, e => `Error:\n${e.message}`);
+    }, e => e?.storage ? e.message : `Error:\n${e?.message || e}`);
   }
 };
 
@@ -2525,14 +2520,18 @@ const App = {
       return;
     }
 
-    Storage.sweepTemp();
+    window.addEventListener('error', e => {
+      console.error('[global error]', e.error || e.message);
+    });
+    window.addEventListener('unhandledrejection', e => {
+      const reason = e.reason;
+      const msg = reason?.storage ? reason.message : (reason?.message || String(reason));
+      console.error('[unhandled rejection]', reason);
+      if (reason?.storage) App.flash('Gagal: ' + msg, true);
+    });
 
-    if (navigator.storage?.persist) {
-      try {
-        const already = await navigator.storage.persisted?.();
-        if (!already) await navigator.storage.persist();
-      } catch {}
-    }
+    Storage.sweepTemp();
+    await App.ensurePersisted();
 
     App.main = new Scroller(
       els.previewViewport, els.previewContainer, App.createMainRow, App.updateMainRow,
@@ -2592,22 +2591,16 @@ const App = {
     els.btnRestoreProject.addEventListener('click', () => els.restoreProjectInput.click());
     els.restoreProjectInput.addEventListener('change', App.restoreProject);
 
-    if (els.projectSearch) {
-      let searchTimer = null;
-      els.projectSearch.addEventListener('input', () => {
-        clearTimeout(searchTimer);
-        searchTimer = setTimeout(() => App.renderDashboardItems(), 180);
-      });
-    }
-    if (els.projectSearchClear) {
-      els.projectSearchClear.addEventListener('click', () => {
-        if (els.projectSearch) {
-          els.projectSearch.value = '';
-          els.projectSearch.focus();
-        }
-        App.renderDashboardItems();
-      });
-    }
+    let searchTimer = null;
+    els.projectSearch.addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => App.renderDashboardItems(), 180);
+    });
+    els.projectSearchClear.addEventListener('click', () => {
+      els.projectSearch.value = '';
+      els.projectSearch.focus();
+      App.renderDashboardItems();
+    });
 
     App.bindSortDropdown();
 
@@ -2615,12 +2608,12 @@ const App = {
       toggleModal(els.dashboardSettingsModal, true);
     });
     els.btnDashboardSettingsClose.addEventListener('click', () => toggleModal(els.dashboardSettingsModal, false));
-    els.btnShortcutsOpen?.addEventListener('click', () => {
+    els.btnShortcutsOpen.addEventListener('click', () => {
       App.renderShortcutList();
       toggleModal(els.shortcutModal, true);
     });
-    els.btnShortcutsClose?.addEventListener('click', () => toggleModal(els.shortcutModal, false));
-    els.btnShortcutsResetAll?.addEventListener('click', () => {
+    els.btnShortcutsClose.addEventListener('click', () => toggleModal(els.shortcutModal, false));
+    els.btnShortcutsResetAll.addEventListener('click', () => {
       if (!confirm('Reset semua shortcut ke default?')) return;
       Shortcuts.resetBindings();
       App.renderShortcutList();
@@ -2628,17 +2621,17 @@ const App = {
     els.btnBackupAll.addEventListener('click', App.backupAll);
     els.btnWipeAllData.addEventListener('click', App.wipeAllData);
 
-    els.btnOpfsExplorerOpen?.addEventListener('click', () => {
+    els.btnOpfsExplorerOpen.addEventListener('click', () => {
       toggleModal(els.opfsExplorerModal, true);
       OpfsExplorer.path = [];
       OpfsExplorer.refresh();
     });
-    els.btnOpfsExplorerClose?.addEventListener('click', () => {
+    els.btnOpfsExplorerClose.addEventListener('click', () => {
       toggleModal(els.opfsExplorerModal, false);
       App.loadDashboard();
     });
-    els.btnOpfsRefresh?.addEventListener('click', () => OpfsExplorer.refresh());
-    els.opfsList?.addEventListener('click', e => OpfsExplorer.handleClick(e));
+    els.btnOpfsRefresh.addEventListener('click', () => OpfsExplorer.refresh());
+    els.opfsList.addEventListener('click', e => OpfsExplorer.handleClick(e));
 
   },
 
@@ -2648,11 +2641,10 @@ const App = {
     const menu = document.getElementById('projectSortMenu');
     const label = document.getElementById('projectSortLabel');
     const hidden = document.getElementById('projectSort');
-    if (!box || !trigger || !menu || !label || !hidden) return;
 
     const labelMap = {};
     menu.querySelectorAll('.sort-menu-item').forEach(item => {
-      labelMap[item.dataset.value] = item.querySelector('.sort-menu-text')?.textContent || item.dataset.value;
+      labelMap[item.dataset.value] = item.querySelector('.sort-menu-text').textContent;
     });
 
     const closeMenu = () => {
@@ -2900,7 +2892,7 @@ const App = {
     els.btnSettingsDasarReset.addEventListener('click', () => App.resetSettingsModal('dasar'));
     els.btnSettingsPromptReset.addEventListener('click', () => { els.settingsPromptInput.value = DEFAULT_PROMPT; });
     els.btnSettingsEpubReset.addEventListener('click', () => { els.settingsEpubTagsInput.value = 'p'; });
-    els.btnSettingsIncrementReset?.addEventListener('click', () => {
+    els.btnSettingsIncrementReset.addEventListener('click', () => {
       els.settingsIncrementCheck.checked = false;
       els.settingsIncrementStepInput.value = 100;
       els.incrementStepWrap.classList.add('section-disabled');
@@ -3121,21 +3113,14 @@ const App = {
 
   syncBookmarkUI() {
     const count = State.bookmarks.length;
-    if (els.bookmarkPanelCount) {
-      els.bookmarkPanelCount.textContent = `(${count})`;
-    }
-    if (els.btnBookmarks) {
-      els.btnBookmarks.disabled = !State.lines.length;
-    }
-    if (els.btnBookmarkClear) {
-      els.btnBookmarkClear.disabled = count === 0;
-    }
-    if (App.main) App.main.forceUpdate();
+    els.bookmarkPanelCount.textContent = `(${count})`;
+    els.btnBookmarks.disabled = !State.lines.length;
+    els.btnBookmarkClear.disabled = count === 0;
+    App.main.forceUpdate();
   },
 
   renderBookmarkList() {
     const list = els.bookmarkList;
-    if (!list) return;
     list.replaceChildren();
     const nums = [...State.bookmarks].sort((a, b) => a - b);
     if (!nums.length) return;
@@ -3258,8 +3243,8 @@ const App = {
     EpubImages.clear();
     State.resetTransient();
     App.syncImportAccept();
-    App.main?.setItems([], false);
-    App.pr?.setItems([], false);
+    App.main.setItems([], false);
+    App.pr.setItems([], false);
     els.nameTableBody.replaceChildren();
     els.pasteArea.value = '';
     els.rangeFromInput.value = '';
@@ -3277,11 +3262,11 @@ const App = {
     App.lastFile = null;
     App.fileCache = null;
     App.toggleBookmarkPanel(false);
-    if (els.bookmarkList) els.bookmarkList.replaceChildren();
+    els.bookmarkList.replaceChildren();
     App.syncBookmarkUI();
     els.workspaceView.style.display = 'none';
     const split = document.querySelector('.split');
-    if (split) split.classList.remove('hide-tools');
+    split.classList.remove('hide-tools');
     els.workspaceToolbar.classList.remove('hidden');
     els.btnShowHeader.classList.remove('visible');
     els.dashboardView.classList.add('open');
@@ -3291,21 +3276,19 @@ const App = {
 
   applyHideTools() {
     const split = document.querySelector('.split');
-    if (!split) return;
     split.classList.toggle('hide-tools', State.hideTools);
-    if (App.main) requestAnimationFrame(() => { App.main.invalidate(); App.main.render(); });
+    requestAnimationFrame(() => { App.main.invalidate(); App.main.render(); });
   },
 
   syncImportAccept() {
     const info = CSTL.plugins.activeParserInfo();
     const accept = info.magic ? '' : Array.from(info.extensions).join(',');
-    if (els.importFileInput) els.importFileInput.accept = accept;
-    if (els.importFolderInput) els.importFolderInput.accept = accept;
+    els.importFileInput.accept = accept;
+    els.importFolderInput.accept = accept;
   },
 
   renderShortcutList() {
     const wrap = els.shortcutList;
-    if (!wrap) return;
     const bindings = Shortcuts.loadBindings();
     wrap.replaceChildren();
     const groups = [
@@ -3384,7 +3367,7 @@ const App = {
   },
 
   checkStorageAlive() {
-    if (!els.dashboardView || !els.dashboardView.classList.contains('open')) return;
+    if (!els.dashboardView.classList.contains('open')) return;
     if (App.storageCheckBusy) return;
     App.storageCheckBusy = true;
     const done = () => { App.storageCheckBusy = false; };
@@ -3395,7 +3378,31 @@ const App = {
     Storage.probe()
       .then(ok => { if (!ok) return App.loadDashboard(); })
       .catch(() => {})
+      .then(() => App.maybePersistAndCheckQuota())
       .then(done, done);
+  },
+
+  async maybePersistAndCheckQuota() {
+    await App.ensurePersisted();
+    App._storageCheckCount = (App._storageCheckCount || 0) + 1;
+    if (App._storageCheckCount % 8 !== 0) return;
+    if (!navigator.storage?.estimate) return;
+    let est;
+    try { est = await navigator.storage.estimate(); } catch { return; }
+    if (!est || !est.quota) return;
+    const free = (est.quota || 0) - (est.usage || 0);
+    const freeMb = free / (1024 * 1024);
+    if (freeMb < 10 && !App._storageCriticalShown) {
+      App._storageCriticalShown = true;
+      App.flash(`Penyimpanan kritis (${freeMb.toFixed(0)} MB bebas). Sebagian tulisan mungkin gagal tersimpan — ekspor project sebagai cadangan.`);
+    } else if (freeMb > 80) {
+      App._storageCriticalShown = false;
+    }
+  },
+
+  ensurePersisted() {
+    if (!navigator.storage?.persist) return Promise.resolve();
+    return navigator.storage.persisted?.().then(already => already ? null : navigator.storage.persist().catch(() => {})).catch(() => {});
   },
 
   startStorageWatch() {
@@ -3407,10 +3414,8 @@ const App = {
   },
 
   stopStorageWatch() {
-    if (App.storageWatchTimer) {
-      clearInterval(App.storageWatchTimer);
-      App.storageWatchTimer = null;
-    }
+    clearInterval(App.storageWatchTimer);
+    App.storageWatchTimer = null;
   },
 
   scheduleStorageHeal() {
@@ -3427,7 +3432,7 @@ const App = {
   async loadDashboard() {
     const list = els.projectList;
     const content = list.parentElement;
-    const countBadge = els.projectCount || document.getElementById('projectCount');
+    const countBadge = els.projectCount;
 
     if (App.dashboardObserver) { App.dashboardObserver.disconnect(); App.dashboardObserver = null; }
     App.dashboardSentinel = null;
@@ -3443,14 +3448,10 @@ const App = {
       if (location.search) history.replaceState(null, '', location.pathname);
       App.dashboardAllItems = items;
 
-      if (countBadge) {
-        countBadge.textContent = items.length;
-        countBadge.hidden = false;
-      }
+      countBadge.textContent = items.length;
+      countBadge.hidden = false;
       const heroActions = document.querySelector('.hero .actions');
-      if (heroActions) {
-        heroActions.style.display = items.length ? '' : 'none';
-      }
+      heroActions.style.display = items.length ? '' : 'none';
       if (!items.length) {
         content.classList.add('is-empty');
         list.innerHTML = `
@@ -3472,10 +3473,8 @@ const App = {
             </div>
           </div>
         `;
-        const newBtn = list.querySelector('.empty-state [data-action="new"]');
-        const restoreBtn = list.querySelector('.empty-state [data-action="restore"]');
-        if (newBtn) newBtn.addEventListener('click', () => document.getElementById('btnNewProject')?.click());
-        if (restoreBtn) restoreBtn.addEventListener('click', () => document.getElementById('btnRestoreProject')?.click());
+        list.querySelector('.empty-state [data-action="new"]').addEventListener('click', () => els.btnNewProject.click());
+        list.querySelector('.empty-state [data-action="restore"]').addEventListener('click', () => els.btnRestoreProject.click());
         return;
       }
       content.classList.remove('is-empty');
@@ -3484,7 +3483,7 @@ const App = {
       App.dashboardFailed = true;
       Storage.invalidateRoot();
       App.scheduleStorageHeal();
-      if (countBadge) countBadge.hidden = true;
+      countBadge.hidden = true;
       content.classList.remove('is-empty');
       list.innerHTML = `
         <div class="empty-state">
@@ -3492,23 +3491,14 @@ const App = {
             <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="var(--danger)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           </div>
           <h3 class="empty-state-title">Gagal mengakses storage</h3>
-          <p class="empty-state-desc">Browser menolak akses penyimpanan, biasanya karena data situs baru saja dibersihkan. Coba lagi untuk memuat ulang daftar; jika tetap gagal, tutup lalu buka kembali aplikasinya.</p>
-          <div class="empty-state-actions">
-            <button type="button" class="btn btn-primary btn-sm" data-action="retry">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/></svg>
-              Coba Lagi
-            </button>
-          </div>
+          <p class="empty-state-desc">Browser menolak akses penyimpanan, biasanya karena data situs baru saja dibersihkan. Daftar akan dicoba muat ulang otomatis; jika tetap gagal, tutup lalu buka kembali aplikasinya.</p>
         </div>
       `;
-      const retryBtn = list.querySelector('[data-action="retry"]');
-      if (retryBtn) retryBtn.addEventListener('click', () => App.loadDashboard());
     }
   },
 
   renderDashboardItems() {
     const list = els.projectList;
-    if (!list) return;
     if (App.dashboardObserver) { App.dashboardObserver.disconnect(); App.dashboardObserver = null; }
     App.dashboardSentinel = null;
     App.dashboardRendered = 0;
@@ -3518,9 +3508,9 @@ const App = {
     const sortSelect = els.projectSort;
     const clearBtn = els.projectSearchClear;
 
-    const query = (searchInput?.value || '').trim().toLowerCase();
-    const sortMode = sortSelect?.value || 'newest';
-    if (clearBtn) clearBtn.hidden = !query;
+    const query = (searchInput.value || '').trim().toLowerCase();
+    const sortMode = sortSelect.value || 'newest';
+    clearBtn.hidden = !query;
 
     let items = (App.dashboardAllItems || []).slice();
 
@@ -3585,7 +3575,7 @@ const App = {
   renderDashboardPage() {
     const list = els.projectList;
     const sentinel = App.dashboardSentinel;
-    if (!list || !sentinel) return;
+    if (!sentinel) return;
 
     const start = App.dashboardRendered;
     const end = Math.min(start + DASHBOARD_PAGE_SIZE, App.dashboardItems.length);
@@ -3623,7 +3613,6 @@ const App = {
         badge = pluginMissing
           ? `<span class="badge badge-plugin is-missing" title="Plugin ${escapeHtml(p.pluginName || p.pluginId)} tidak terpasang">BUTUH PLUGIN</span>`
           : '<span class="badge badge-plugin">PLUGIN</span>';
-        typeClass = 'is-plugin';
       }
     }
     if (typeClass) card.classList.add(typeClass);
@@ -3728,19 +3717,27 @@ const App = {
   },
 
   async backup(p) {
-    await withProgress('Mem-backup project...', 'Membaca data...', async () => {
+    const result = await withProgress('Mem-backup project...', 'Membaca data...', async () => {
       Progress.determinate('Mem-backup project', 'Memproses...');
-      const result = await buildBackup(p.id, p.name, Progress.update);
-      download(URL.createObjectURL(result.blob), result.name);
+      const r = await buildBackup(p.id, p.name, Progress.update);
+      download(URL.createObjectURL(r.blob), r.name);
+      return r;
     }, e => friendlyError(e, 'Gagal backup: '));
+    if (result?.warnings?.length) {
+      setTimeout(() => alert('Backup selesai dengan catatan:\n- ' + result.warnings.join('\n- ')), 50);
+    }
   },
 
   async backupAll() {
-    await withProgress('Mem-backup semua project...', 'Menghitung project...', async () => {
+    const result = await withProgress('Mem-backup semua project...', 'Menghitung project...', async () => {
       Progress.determinate('Mem-backup semua project', 'Memulai...');
-      const result = await backupAll(Progress.update);
-      download(URL.createObjectURL(result.blob), result.name);
+      const r = await backupAll(Progress.update);
+      download(URL.createObjectURL(r.blob), r.name);
+      return r;
     }, e => e.message === 'Belum ada Project untuk di-backup.' ? e.message : friendlyError(e, 'Gagal backup semua project: '));
+    if (result?.warnings?.length) {
+      setTimeout(() => alert('Backup selesai dengan catatan:\n- ' + result.warnings.join('\n- ')), 50);
+    }
   },
 
   async restoreProject(e) {
@@ -3754,7 +3751,12 @@ const App = {
     }, e => friendlyError(e, 'File korup: '));
     if (result) {
       if (result.single) alert(`Project "${result.name}" dipulihkan!`);
-      else alert(`${result.ok} project berhasil dipulihkan${result.fail ? `, ${result.fail} gagal` : ''}.`);
+      else {
+        const failMsg = result.fail
+          ? `, ${result.fail} gagal:\n- ${result.errors.slice(0, 5).map(e => `${e.name}: ${e.message}`).join('\n- ')}`
+          : '';
+        alert(`${result.ok} project berhasil dipulihkan${failMsg}.`);
+      }
     }
     e.target.value = '';
   },
@@ -3775,14 +3777,7 @@ const App = {
   updateButtons() {
     const has = State.lines.length > 0;
     const sel = State.selected.size > 0;
-    els.btnExport.disabled = !has;
-    els.btnProofread.disabled = !has;
-    els.btnSelectAll.disabled = !has;
-    els.pasteArea.disabled = !has;
-    els.btnApply.disabled = !has;
-    els.rangeFromInput.disabled = !has;
-    els.rangeToInput.disabled = !has;
-    els.btnSelectRange.disabled = !has;
+    [els.btnExport, els.btnProofread, els.btnSelectAll, els.pasteArea, els.btnApply, els.rangeFromInput, els.rangeToInput, els.btnSelectRange].forEach(b => { b.disabled = !has; });
     els.btnClearSelection.disabled = !sel;
     els.btnCopyForAi.disabled = !sel;
     const n = State.selected.size;
@@ -4075,7 +4070,7 @@ const App = {
   selectRange() {
     const from = parseInt(els.rangeFromInput.value);
     const to = parseInt(els.rangeToInput.value);
-    const max = State.lines.length ? State.lines.reduce((m, l) => Math.max(m, l.line_num), 0) : 0;
+    const max = State.lines.length ? State.maxLineNum() : 0;
     if (isNaN(from) || isNaN(to) || from > to || from < 1 || from > max || to > max) return alert('Range tidak valid.');
 
     State.selected.clear();
@@ -4244,7 +4239,7 @@ const App = {
 
   prefillIncrement() {
     const step = Math.max(1, Math.floor(Number(State.incrementStep) || 100));
-    const max = State.lines.reduce((m, l) => Math.max(m, l.line_num), 0);
+    const max = State.maxLineNum();
     if (!max) return;
     const from = App.nextUntranslatedAfter(App.lastTranslatedNum());
     if (from === null) {
@@ -4262,7 +4257,7 @@ const App = {
   applyIncrement(applied) {
     if (!State.incrementEnabled || !State.lines.length) return null;
     const step = Math.max(1, Math.floor(Number(State.incrementStep) || 100));
-    const max = State.lines.reduce((m, l) => Math.max(m, l.line_num), 0);
+    const max = State.maxLineNum();
     const pf = parseInt(els.rangeFromInput.value, 10);
     const pt = parseInt(els.rangeToInput.value, 10);
     const hasRange = Number.isFinite(pf) && Number.isFinite(pt) && pf >= 1 && pt >= pf;
@@ -4292,27 +4287,20 @@ const App = {
     return ` Rentang berikutnya ${from}-${to} dipilih.`;
   },
 
-  undo() {
-    if (!State.undo) return;
-    State.redo = snapshot();
-    State.lines = State.undo.lines.map(normalizeLine);
-    State.selected = new Set(State.undo.selected);
-    State.undo = null;
+  _swapHistory(dir) {
+    const from = State[dir];
+    if (!from) return;
+    const opp = dir === 'undo' ? 'redo' : 'undo';
+    State[opp] = snapshot();
+    State.lines = from.lines.map(normalizeLine);
+    State.selected = new Set(from.selected);
+    State[dir] = null;
     State.namesDirty = true;
     App.refresh(true);
     State.queueSave();
   },
-
-  redo() {
-    if (!State.redo) return;
-    State.undo = snapshot();
-    State.lines = State.redo.lines.map(normalizeLine);
-    State.selected = new Set(State.redo.selected);
-    State.redo = null;
-    State.namesDirty = true;
-    App.refresh(true);
-    State.queueSave();
-  },
+  undo() { App._swapHistory('undo'); },
+  redo() { App._swapHistory('redo'); },
 
   openLineEditor(num) {
     const l = State.byNum.get(num);
@@ -4533,7 +4521,6 @@ const PluginHost = {
 
   ui: {
     flash: msg => App.flash(msg),
-    escapeHtml,
     comboHtml,
     themeVarsCss,
     shortcutComboFor: id => {
@@ -4545,15 +4532,13 @@ const PluginHost = {
       App.syncImportAccept();
     },
     onShortcutListMaybeRender: () => {
-      if (els.shortcutModal?.classList.contains('open')) App.renderShortcutList();
+      if (els.shortcutModal.classList.contains('open')) App.renderShortcutList();
     },
     loadDashboard: () => App.loadDashboard(),
     closeDropdowns: () => closeDropdowns()
   },
 
   util: {
-    jsZipReady,
-    download,
     clipboard,
     progress: Progress
   }
