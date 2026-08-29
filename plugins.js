@@ -57,6 +57,7 @@ const RATE_TOAST_PER_MIN = 30;
 const RATE_FETCH_PER_MIN = 60;
 const NET_TIMEOUT_DEFAULT_MS = 30000;
 const NET_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
+const THEME_ASSET_MIME_RE = /^image\/(png|jpeg|gif|webp|svg\+xml|avif)$/i;
 
 const BUILTIN_EXTENSIONS = new Set(['.json', '.epub']);
 
@@ -311,7 +312,7 @@ const ZipReader = {
   }
 };
 
-function sanitizeThemeCss(css) {
+function sanitizeThemeCss(css, resolveAsset) {
   if (typeof css !== 'string' || !css) return '';
   const n = css.length;
   let out = '';
@@ -370,12 +371,23 @@ function sanitizeThemeCss(css) {
     }
     return n;
   };
+  const ASSET_SCHEME_RE = /^asset:([a-zA-Z0-9_.-]{1,255})$/;
   const urlAllowed = url => {
     const t = url.trim();
     if (!t) return true;
     if (/^data:/i.test(t)) return true;
     if (t.startsWith('#')) return true;
     return false;
+  };
+  const resolveUrl = url => {
+    const t = url.trim();
+    const m = typeof resolveAsset === 'function' ? t.match(ASSET_SCHEME_RE) : null;
+    if (m) {
+      const resolved = resolveAsset(m[1]);
+      if (typeof resolved === 'string' && resolved.startsWith('blob:')) return resolved;
+      return null;
+    }
+    return urlAllowed(t) ? t : null;
   };
 
   while (i < n) {
@@ -444,8 +456,10 @@ function sanitizeThemeCss(css) {
         if (arg.length >= 2 && ((arg[0] === '"' && arg.endsWith('"')) || (arg[0] === "'" && arg.endsWith("'")))) {
           decoded = decodeCssString(arg.slice(1, -1));
         }
-        if (urlAllowed(decoded)) out += css.slice(i, close + 1);
-        else out += 'url("data:,")';
+        const resolved = resolveUrl(decoded);
+        if (resolved === null) out += 'url("data:,")';
+        else if (resolved === decoded) out += css.slice(i, close + 1);
+        else out += 'url("' + resolved.replace(/"/g, '\\"') + '")';
         i = close + 1;
         continue;
       }
@@ -494,6 +508,11 @@ const PERMISSIONS = {
     label: 'WebAssembly',
     desc: 'Menjalankan modul WASM dari paket.',
     icon: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>'
+  },
+  gpu: {
+    label: 'WebGPU',
+    desc: 'Akses GPU untuk komputasi/rendering.',
+    icon: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/>'
   },
   jszip: {
     label: 'JSZip',
@@ -1101,6 +1120,7 @@ function pluginFrameMain(token) {
         asset: path => callHost('asset', [path]),
         assetText: path => callHost('assetText', [path]),
         get JSZip() { return perms.has('jszip') ? (window.JSZip || null) : null; },
+        get gpu() { return perms.has('gpu') ? (navigator.gpu || null) : null; },
         wasm: async (source, imports) => {
           needPerm('wasm');
           const bytes = toWasmSource(source);
@@ -1118,6 +1138,10 @@ function pluginFrameMain(token) {
         listBlobs: gated('storage', 'listBlobs'),
         blobExists: gated('storage', 'blobExists'),
         fetch: (url, opts) => { needPerm('net'); return callHost('fetch', [url, opts && typeof opts === 'object' ? opts : {}]); },
+        theme: {
+          setAsset: (key, bytes, mime) => { needPerm('theme'); return callHost('setThemeAsset', [key, bytes, mime]); },
+          deleteAsset: key => { needPerm('theme'); return callHost('deleteThemeAsset', [key]); }
+        },
         on: (event, handler) => {
           if (typeof handler !== 'function') return () => {};
           if ((event === 'copy' || event === 'apply') && !perms.has('hooks')) return () => {};
@@ -1299,6 +1323,7 @@ const Sandbox = {
       hasExtract: false,
       hasPack: false,
       panelCard: parentEl ? parentEl.closest('.plugin-panel-card') : null,
+      themeAssets: new Map(),
       onReady,
       call(method, arg, timeoutMs) {
         return new Promise((resolve, reject) => {
@@ -1360,10 +1385,19 @@ const Sandbox = {
   destroy(inst) {
     Runtime._live.delete(inst);
     if (inst.panelCard) { try { inst.panelCard.remove(); } catch {} }
+    Sandbox._revokeThemeAssets(inst);
     let killed = false;
     const kill = () => { if (!killed) { killed = true; try { inst.frame.remove(); } catch {} } };
     setTimeout(kill, 300);
     inst.call('deactivate', {}).then(kill, kill);
+  },
+
+  _revokeThemeAssets(inst) {
+    if (!inst.themeAssets) return;
+    for (const url of inst.themeAssets.values()) {
+      try { URL.revokeObjectURL(url); } catch {}
+    }
+    inst.themeAssets.clear();
   }
 };
 
@@ -1891,7 +1925,9 @@ const Runtime = {
     }
     const parts = [];
     for (const inst of Runtime._instances.values()) {
-      if (inst.theme && inst.theme.trim() && inst.meta.permissions.includes('theme')) parts.push(sanitizeThemeCss(inst.theme));
+      if (inst.theme && inst.theme.trim() && inst.meta.permissions.includes('theme')) {
+        parts.push(sanitizeThemeCss(inst.theme, key => inst.themeAssets.get(key) || null));
+      }
     }
     const css = parts.join('\n');
     Runtime._styleEl.textContent = css;
@@ -2090,6 +2126,29 @@ const Runtime = {
       fetch: gate('net', (url, opts) => {
         if (!Runtime._rateOk(inst.meta.id, 'fetch', RATE_FETCH_PER_MIN)) throw new Error('Terlalu banyak permintaan jaringan — coba lagi sebentar lagi.');
         return NetRunner.fetch(url, opts);
+      }),
+      setThemeAsset: gate('theme', (key, bytes, mime) => {
+        if (!validBlobKey(key)) throw new Error('Key asset tema tidak valid.');
+        const m = typeof mime === 'string' ? mime.toLowerCase().trim() : '';
+        if (!THEME_ASSET_MIME_RE.test(m)) throw new Error('Tipe gambar tidak didukung untuk asset tema.');
+        let u8;
+        if (bytes instanceof Uint8Array) u8 = bytes;
+        else if (bytes instanceof ArrayBuffer) u8 = new Uint8Array(bytes);
+        else throw new Error('Data asset tema harus Uint8Array atau ArrayBuffer.');
+        const old = inst.themeAssets.get(key);
+        if (old) { try { URL.revokeObjectURL(old); } catch {} }
+        const blob = new Blob([u8], { type: m });
+        const url = URL.createObjectURL(blob);
+        inst.themeAssets.set(key, url);
+        Runtime.applyTheme();
+        return null;
+      }),
+      deleteThemeAsset: gate('theme', key => {
+        if (!validBlobKey(key)) return;
+        const old = inst.themeAssets.get(key);
+        if (old) { try { URL.revokeObjectURL(old); } catch {} }
+        inst.themeAssets.delete(key);
+        Runtime.applyTheme();
       })
     };
   },
