@@ -558,8 +558,8 @@ const Manifest = {
       errors.push('"description" opsional, string maks 300 karakter.');
     }
 
-    if (m.api !== undefined && m.api !== PLUGIN_API_VERSION) {
-      errors.push(`"api" harus ${PLUGIN_API_VERSION} — satu-satunya versi API yang didukung versi aplikasi ini.`);
+    if (typeof m.api !== 'number' || !Number.isInteger(m.api) || m.api < 1 || m.api > PLUGIN_API_VERSION) {
+      errors.push(`"api" wajib diisi, bilangan bulat 1-${PLUGIN_API_VERSION} (ditemukan ${JSON.stringify(m.api)}) — versi API aplikasi ini adalah ${PLUGIN_API_VERSION}.`);
     }
 
     if (m.permissions !== undefined) {
@@ -728,7 +728,7 @@ const Manifest = {
       version: m.version.trim(),
       author: (m.author || '').trim(),
       description: (m.description || '').trim(),
-      api: PLUGIN_API_VERSION,
+      api: m.api,
       permissions,
       extensions: (m.extensions || []).map(e => String(e).toLowerCase()),
       magic,
