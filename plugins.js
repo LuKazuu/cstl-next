@@ -498,7 +498,7 @@ const PERMISSIONS = {
   },
   theme: {
     label: 'Tema',
-    desc: 'CSS tema tampilan (offline, tanpa jaringan).',
+    desc: 'CSS tema tampilan.',
     icon: '<circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="10.5" r="2.5"/><circle cx="8.5" cy="7.5" r="2.5"/><circle cx="6.5" cy="12.5" r="2.5"/><path d="M12 2a10 10 0 1 0 10 10c0-1-1-2-2-2h-2a2 2 0 0 1-2-2c0-.5.2-1 .5-1.5A10 10 0 0 0 12 2z"/>'
   },
   net: {
@@ -559,7 +559,7 @@ const Manifest = {
     }
 
     if (typeof m.api !== 'number' || !Number.isInteger(m.api) || m.api < 1 || m.api > PLUGIN_API_VERSION) {
-      errors.push(`"api" wajib diisi, bilangan bulat 1-${PLUGIN_API_VERSION} (ditemukan ${JSON.stringify(m.api)}) — versi API aplikasi ini adalah ${PLUGIN_API_VERSION}.`);
+      errors.push(`"api" wajib diisi atau tidak valid, ditemukan ${JSON.stringify(m.api)} — versi API aplikasi ini adalah ${PLUGIN_API_VERSION}.`);
     }
 
     if (m.permissions !== undefined) {
@@ -910,7 +910,7 @@ const Dialogs = {
         </div>`
       : `<div class="consent-notice">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          <span>Plugin berjalan di sandbox <strong>tanpa akses jaringan</strong> dan hanya bisa melakukan hal di atas. Batalkan jika tidak memercayai sumbernya.</span>
+          <span>Plugin berjalan di sandbox dan hanya bisa melakukan hal di atas. Batalkan jika tidak memercayai sumbernya.</span>
         </div>`;
 
     const body = `
