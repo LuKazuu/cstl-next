@@ -64,6 +64,7 @@ const BUILTIN_EXTENSIONS = new Set(['.json', '.epub']);
 const FRAME_CSP = [
   "default-src 'none'",
   "script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+  "worker-src blob:",
   "style-src 'unsafe-inline'",
   "img-src data: blob:",
   "font-src data: blob:",
@@ -989,6 +990,16 @@ function pluginFrameMain(token) {
   };
   const gated = (perm, method) => (...args) => { needPerm(perm); return callHost(method, args); };
 
+  const enforceGpuGate = () => {
+    if (perms.has('gpu')) return;
+    try {
+      Object.defineProperty(Navigator.prototype, 'gpu', {
+        get() { return undefined; },
+        configurable: true
+      });
+    } catch (e) {}
+  };
+
   const toWasmSource = source => {
     if (source instanceof Uint8Array) return source;
     if (source instanceof ArrayBuffer) return new Uint8Array(source);
@@ -1091,6 +1102,7 @@ function pluginFrameMain(token) {
       sharedSettings = isPlainObject(m.sharedSettings) ? m.sharedSettings : {};
       perms.clear();
       if (Array.isArray(m.permissions)) for (const p of m.permissions) perms.add(p);
+      enforceGpuGate();
       if (m.jszip) {
         const s = document.createElement('script');
         s.textContent = m.jszip;
