@@ -65,7 +65,6 @@ const BUILTIN_EXTENSIONS = new Set(['.json', '.epub']);
 const FRAME_CSP = [
   "default-src 'none'",
   "script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
-  "worker-src blob:",
   "style-src 'unsafe-inline'",
   "img-src data: blob:",
   "font-src data: blob:",
@@ -75,6 +74,7 @@ const FRAME_CSP = [
   "base-uri 'none'",
   "form-action 'none'"
 ].join('; ');
+const HELPER_CSP = FRAME_CSP + '; worker-src blob:';
 
 const esc = escapeHtml;
 
@@ -970,7 +970,7 @@ const Dialogs = {
   }
 };
 
-function gpuWorkerShim() {
+function gpuWorkerShim(net) {
   const drop = (obj, name) => { try { delete obj[name]; } catch (e) {} };
   drop(WorkerGlobalScope.prototype, 'caches');
   drop(WorkerGlobalScope.prototype, 'indexedDB');
@@ -983,6 +983,11 @@ function gpuWorkerShim() {
   drop(WorkerGlobalScope.prototype, 'SharedWorker');
   drop(DedicatedWorkerGlobalScope.prototype, 'Worker');
   drop(DedicatedWorkerGlobalScope.prototype, 'SharedWorker');
+  if (!net) {
+    drop(self, 'RTCPeerConnection');
+    drop(WorkerGlobalScope.prototype, 'RTCPeerConnection');
+    drop(DedicatedWorkerGlobalScope.prototype, 'RTCPeerConnection');
+  }
 }
 
 function gpuWorkerHostMain() {
@@ -1067,6 +1072,13 @@ function pluginFrameMain(token) {
         configurable: true
       });
     } catch (e) {}
+  };
+
+  const enforceNetGate = () => {
+    if (perms.has('net')) return;
+    for (const k of ['RTCPeerConnection', 'webkitRTCPeerConnection']) {
+      try { delete self[k]; } catch (e) {}
+    }
   };
 
   const toWasmSource = source => {
@@ -1172,6 +1184,7 @@ function pluginFrameMain(token) {
       perms.clear();
       if (Array.isArray(m.permissions)) for (const p of m.permissions) perms.add(p);
       enforceGpuGate();
+      enforceNetGate();
       if (m.jszip) {
         const s = document.createElement('script');
         s.textContent = m.jszip;
@@ -1393,7 +1406,7 @@ const GpuWorkers = {
       frame.tabIndex = -1;
       frame.style.cssText = 'display:none';
       frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8">'
-        + '<meta http-equiv="Content-Security-Policy" content="' + FRAME_CSP.replace(/"/g, '&quot;') + '">'
+        + '<meta http-equiv="Content-Security-Policy" content="' + HELPER_CSP.replace(/"/g, '&quot;') + '">'
         + '</head><body><scr' + 'ipt>(' + gpuWorkerHostMain.toString() + ')();</scr' + 'ipt></body></html>';
       const timer = setTimeout(() => reject(new Error('Host worker GPU gagal dimuat.')), BOOT_TIMEOUT_MS);
       frame.addEventListener('load', () => {
@@ -1417,7 +1430,8 @@ const GpuWorkers = {
     if (!src.trim()) throw new Error('Sumber worker kosong.');
     if (inst.gpuWorkers.size >= GPU_WORKER_MAX) throw new Error('Maksimal ' + GPU_WORKER_MAX + ' worker GPU aktif per plugin.');
     const win = await GpuWorkers._window();
-    const id = win.__cstlGpuSpawn('(' + gpuWorkerShim.toString() + ')();\n' + src, inst.token);
+    const net = inst.meta.permissions.includes('net');
+    const id = win.__cstlGpuSpawn('(' + gpuWorkerShim.toString() + ')(' + (net ? 'true' : 'false') + ');\n' + src, inst.token);
     inst.gpuWorkers.add(id);
     return id;
   },
