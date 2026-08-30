@@ -55,6 +55,7 @@ const WASM_MODULE_CACHE_MAX = 8;
 const RATE_DOWNLOAD_PER_MIN = 20;
 const RATE_TOAST_PER_MIN = 30;
 const RATE_FETCH_PER_MIN = 60;
+const GPU_WORKER_MAX = 8;
 const NET_TIMEOUT_DEFAULT_MS = 30000;
 const NET_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 const THEME_ASSET_MIME_RE = /^image\/(png|jpeg|gif|webp|svg\+xml|avif)$/i;
@@ -969,6 +970,54 @@ const Dialogs = {
   }
 };
 
+function gpuWorkerShim() {
+  const drop = (obj, name) => { try { delete obj[name]; } catch (e) {} };
+  drop(WorkerGlobalScope.prototype, 'caches');
+  drop(WorkerGlobalScope.prototype, 'indexedDB');
+  drop(WorkerGlobalScope.prototype, 'requestFileSystemSync');
+  drop(WorkerGlobalScope.prototype, 'webkitRequestFileSystemSync');
+  drop(WorkerNavigator.prototype, 'storage');
+  drop(self, 'Worker');
+  drop(self, 'SharedWorker');
+  drop(WorkerGlobalScope.prototype, 'Worker');
+  drop(WorkerGlobalScope.prototype, 'SharedWorker');
+  drop(DedicatedWorkerGlobalScope.prototype, 'Worker');
+  drop(DedicatedWorkerGlobalScope.prototype, 'SharedWorker');
+}
+
+function gpuWorkerHostMain() {
+  const workers = new Map();
+  let seq = 0;
+  const send = (key, id, msg) => {
+    try { parent.postMessage({ __cstlGpu: Object.assign({ key, id }, msg) }, '*'); } catch (e) {}
+  };
+  window.__cstlGpuSpawn = (source, key) => {
+    const id = ++seq;
+    const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+    let w;
+    try { w = new Worker(url); }
+    catch (err) { try { URL.revokeObjectURL(url); } catch (e) {} throw err; }
+    w.onmessage = e => send(key, id, { kind: 'message', data: e.data });
+    w.onerror = e => send(key, id, { kind: 'error', message: String(e.message || 'Worker error') });
+    w.onmessageerror = () => send(key, id, { kind: 'error', message: 'Data dari worker tidak dapat diserialisasi.' });
+    workers.set(id, { w, url, key });
+    return id;
+  };
+  window.__cstlGpuPost = (id, data) => {
+    const rec = workers.get(id);
+    if (!rec) return;
+    try { rec.w.postMessage(data); }
+    catch (err) { send(rec.key, id, { kind: 'error', message: 'Data ke worker tidak dapat dikirim: ' + String(err && err.message || err) }); }
+  };
+  window.__cstlGpuKill = id => {
+    const rec = workers.get(id);
+    if (!rec) return;
+    workers.delete(id);
+    try { rec.w.terminate(); } catch (e) {}
+    try { URL.revokeObjectURL(rec.url); } catch (e) {}
+  };
+}
+
 function pluginFrameMain(token) {
   'use strict';
   let plug = null, api = null, settings = {}, globalSettings = {}, sharedSettings = {}, pluginId = '', seq = 0, panelMounted = false;
@@ -989,6 +1038,26 @@ function pluginFrameMain(token) {
     if (!perms.has(p)) throw new Error('Izin "' + p + '" tidak diminta plugin ini di manifest.json — API terkait tidak tersedia.');
   };
   const gated = (perm, method) => (...args) => { needPerm(perm); return callHost(method, args); };
+
+  const gpuWorkers = new Map();
+  const gpuQueue = new Map();
+  const gpuDeliver = (h, m) => {
+    if (m.kind === 'error') {
+      if (typeof h.onerror === 'function') h.onerror(new Error(m.message || 'Worker error'));
+      return;
+    }
+    if (typeof h.onmessage === 'function') h.onmessage({ data: m.data });
+  };
+  listeners.set('gpuworker', new Set([m => {
+    if (gpuWorkers.has(m.id)) {
+      const h = gpuWorkers.get(m.id);
+      if (h) gpuDeliver(h, m);
+      return;
+    }
+    let q = gpuQueue.get(m.id);
+    if (!q) { q = []; gpuQueue.set(m.id, q); }
+    q.push(m);
+  }]));
 
   const enforceGpuGate = () => {
     if (perms.has('gpu')) return;
@@ -1133,6 +1202,35 @@ function pluginFrameMain(token) {
         assetText: path => callHost('assetText', [path]),
         get JSZip() { return perms.has('jszip') ? (window.JSZip || null) : null; },
         get gpu() { return perms.has('gpu') ? (navigator.gpu || null) : null; },
+        gpuWorker: source => {
+          needPerm('gpu');
+          return callHost('gpuWorker', [source]).then(id => {
+            const h = {
+              onmessage: null,
+              onerror: null,
+              postMessage: data => {
+                callHost('gpuWorkerPost', [id, data]).catch(err => {
+                  if (typeof h.onerror === 'function') h.onerror(new Error(String(err && err.message || err)));
+                });
+              },
+              terminate: () => {
+                gpuWorkers.set(id, null);
+                gpuQueue.delete(id);
+                callHost('gpuWorkerTerminate', [id]).catch(() => {});
+              }
+            };
+            gpuWorkers.set(id, h);
+            const q = gpuQueue.get(id);
+            if (q) {
+              gpuQueue.delete(id);
+              setTimeout(() => {
+                if (gpuWorkers.get(id) !== h) return;
+                for (const m of q) gpuDeliver(h, m);
+              }, 0);
+            }
+            return h;
+          });
+        },
         wasm: async (source, imports) => {
           needPerm('wasm');
           const bytes = toWasmSource(source);
@@ -1267,6 +1365,83 @@ function pluginFrameMain(token) {
 
 let host = null;
 
+const GpuWorkers = {
+  _bound: false,
+  _ready: null,
+
+  listen() {
+    if (GpuWorkers._bound) return;
+    GpuWorkers._bound = true;
+    window.addEventListener('message', e => {
+      const m = e.data;
+      if (!m || typeof m !== 'object' || !m.__cstlGpu) return;
+      const g = m.__cstlGpu;
+      if (typeof g.key !== 'string' || typeof g.id !== 'number') return;
+      for (const inst of Runtime._live) {
+        if (inst.token !== g.key) continue;
+        inst.call('emit', { event: 'gpuworker', payload: { id: g.id, kind: g.kind, data: g.data, message: g.message } }).catch(() => {});
+        break;
+      }
+    });
+  },
+
+  _window() {
+    if (GpuWorkers._ready) return GpuWorkers._ready;
+    GpuWorkers._ready = new Promise((resolve, reject) => {
+      const frame = document.createElement('iframe');
+      frame.setAttribute('aria-hidden', 'true');
+      frame.tabIndex = -1;
+      frame.style.cssText = 'display:none';
+      frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8">'
+        + '<meta http-equiv="Content-Security-Policy" content="' + FRAME_CSP.replace(/"/g, '&quot;') + '">'
+        + '</head><body><scr' + 'ipt>(' + gpuWorkerHostMain.toString() + ')();</scr' + 'ipt></body></html>';
+      const timer = setTimeout(() => reject(new Error('Host worker GPU gagal dimuat.')), BOOT_TIMEOUT_MS);
+      frame.addEventListener('load', () => {
+        clearTimeout(timer);
+        if (frame.contentWindow && typeof frame.contentWindow.__cstlGpuSpawn === 'function') resolve(frame.contentWindow);
+        else reject(new Error('Host worker GPU gagal dimuat.'));
+      });
+      document.body.appendChild(frame);
+    });
+    GpuWorkers._ready.catch(() => { GpuWorkers._ready = null; });
+    return GpuWorkers._ready;
+  },
+
+  async spawn(inst, source) {
+    let src;
+    if (typeof source === 'string') src = source;
+    else if (source instanceof Blob) src = await source.text();
+    else if (source instanceof ArrayBuffer) src = new TextDecoder().decode(source);
+    else if (source instanceof Uint8Array) src = new TextDecoder().decode(source);
+    else throw new Error('Sumber worker harus string, Blob, ArrayBuffer, atau Uint8Array.');
+    if (!src.trim()) throw new Error('Sumber worker kosong.');
+    if (inst.gpuWorkers.size >= GPU_WORKER_MAX) throw new Error('Maksimal ' + GPU_WORKER_MAX + ' worker GPU aktif per plugin.');
+    const win = await GpuWorkers._window();
+    const id = win.__cstlGpuSpawn('(' + gpuWorkerShim.toString() + ')();\n' + src, inst.token);
+    inst.gpuWorkers.add(id);
+    return id;
+  },
+
+  async post(inst, id, data) {
+    if (!inst.gpuWorkers.has(id)) throw new Error('Worker GPU tidak ditemukan.');
+    const win = await GpuWorkers._window();
+    win.__cstlGpuPost(id, data);
+  },
+
+  async kill(inst, id) {
+    if (!inst.gpuWorkers.has(id)) throw new Error('Worker GPU tidak ditemukan.');
+    inst.gpuWorkers.delete(id);
+    try {
+      const win = await GpuWorkers._window();
+      win.__cstlGpuKill(id);
+    } catch (e) {}
+  },
+
+  release(inst) {
+    for (const id of Array.from(inst.gpuWorkers)) GpuWorkers.kill(inst, id);
+  }
+};
+
 const Sandbox = {
   _bound: false,
 
@@ -1328,6 +1503,7 @@ const Sandbox = {
       zip,
       pending: new Map(),
       seq: 0,
+      gpuWorkers: new Set(),
       info: null,
       theme: null,
       cmdMeta: [],
@@ -1388,6 +1564,7 @@ const Sandbox = {
       return inst;
     } catch (e) {
       Runtime._live.delete(inst);
+      GpuWorkers.release(inst);
       if (inst.panelCard) { try { inst.panelCard.remove(); } catch {} }
       try { frame.remove(); } catch {}
       throw e;
@@ -1396,6 +1573,7 @@ const Sandbox = {
 
   destroy(inst) {
     Runtime._live.delete(inst);
+    GpuWorkers.release(inst);
     if (inst.panelCard) { try { inst.panelCard.remove(); } catch {} }
     Sandbox._revokeThemeAssets(inst);
     let killed = false;
@@ -2139,6 +2317,9 @@ const Runtime = {
         if (!Runtime._rateOk(inst.meta.id, 'fetch', RATE_FETCH_PER_MIN)) throw new Error('Terlalu banyak permintaan jaringan — coba lagi sebentar lagi.');
         return NetRunner.fetch(url, opts);
       }),
+      gpuWorker: gate('gpu', source => GpuWorkers.spawn(inst, source)),
+      gpuWorkerPost: gate('gpu', (id, data) => GpuWorkers.post(inst, id, data)),
+      gpuWorkerTerminate: gate('gpu', id => GpuWorkers.kill(inst, id)),
       setThemeAsset: gate('theme', (key, bytes, mime) => {
         if (!validBlobKey(key)) throw new Error('Key asset tema tidak valid.');
         const m = typeof mime === 'string' ? mime.toLowerCase().trim() : '';
@@ -2868,6 +3049,7 @@ CSTL.plugins = {
       pluginPanels: g('pluginPanels')
     };
     Sandbox.listen();
+    GpuWorkers.listen();
     PluginUI.bind();
   },
 
