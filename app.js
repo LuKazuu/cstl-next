@@ -4072,7 +4072,8 @@ const App = {
   },
 
   formatLine(l) {
-    return l.name ? `${l.line_num}. ${l.name}: ${l.message}` : `${l.line_num}. ${l.message}`;
+    const name = (!State.ignoreName && l.name) ? `${l.name}: ` : '';
+    return `${l.line_num}. ${name}${l.message}`;
   },
 
   async copyForAi() {
@@ -4169,12 +4170,12 @@ const App = {
     results.forEach(r => {
       const l = State.byNum.get(r.num);
       if (!l) { errors.push(`Baris ${r.num}: ID tidak ada.`); return; }
-      if (State.ignoreName && l.name) r.name = l.name;
+      if (State.ignoreName) r.name = null;
       const hasOn = !!(l.name || '').trim();
       const hasTn = !!(r.name || '').trim();
       const hasMsg = !!(l.message || '').trim();
-      if (hasOn && !hasTn) errors.push(`Baris ${r.num}: Nama dihapus AI.`);
-      else if (!hasOn && hasTn) errors.push(`Baris ${r.num}: Narasi tapi ada nama.`);
+      if (!State.ignoreName && hasOn && !hasTn) errors.push(`Baris ${r.num}: Nama dihapus AI.`);
+      else if (!State.ignoreName && !hasOn && hasTn) errors.push(`Baris ${r.num}: Narasi tapi ada nama.`);
       else if (!r.msg && hasMsg) errors.push(`Baris ${r.num}: Pesan kosong.`);
       else updates.push({ line: l, item: r });
     });
@@ -4186,7 +4187,7 @@ const App = {
     updates.forEach(({ line, item }) => {
       line.trans_message = item.msg;
       line.is_translated = true;
-      if (item.name) line.trans_name = State.ignoreName ? null : item.name;
+      line.trans_name = State.ignoreName ? null : (item.name || line.trans_name || null);
       State.selected.delete(line.line_num);
     });
 
