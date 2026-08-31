@@ -4072,6 +4072,10 @@ const App = {
   },
 
   formatLine(l) {
+    return l.name ? `${l.line_num}. ${l.name}: ${l.message}` : `${l.line_num}. ${l.message}`;
+  },
+
+  formatLineForAi(l) {
     const name = (!State.ignoreName && l.name) ? `${l.name}: ` : '';
     return `${l.line_num}. ${name}${l.message}`;
   },
@@ -4093,7 +4097,7 @@ const App = {
       if (State.ringkasan && State.ringkasan.trim()) parts.push(`Ringkasan Sebelumnya:\n${State.ringkasan.trim()}`);
       if (State.ringkasanPrompt && State.ringkasanPrompt.trim()) parts.push(State.ringkasanPrompt.trim());
     }
-    parts.push(sel.map(App.formatLine).join('\n'));
+    parts.push(sel.map(App.formatLineForAi).join('\n'));
     const text = await CSTL.plugins.runCopyHook(parts.join('\n\n'));
 
     try {
