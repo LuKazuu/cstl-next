@@ -20,10 +20,11 @@ CSTL.util = {
   humanBytes(n) {
     const v = Number(n);
     if (!Number.isFinite(v) || v < 0) return '0 B';
-    if (v < 1024) return v + ' B';
-    if (v < 1048576) return (v / 1024).toFixed(1) + ' KB';
-    if (v < 1073741824) return (v / 1048576).toFixed(2) + ' MB';
-    return (v / 1073741824).toFixed(2) + ' GB';
+    const { KB, MB, GB } = CFG.bytes;
+    if (v < KB) return v + ' B';
+    if (v < MB) return (v / KB).toFixed(1) + ' KB';
+    if (v < GB) return (v / MB).toFixed(2) + ' MB';
+    return (v / GB).toFixed(2) + ' GB';
   },
   validBlobKey(key) {
     if (typeof key !== 'string' || !key || key.length > 255) return false;
@@ -38,28 +39,72 @@ const MANIFEST_FILE = 'manifest.json';
 const ENTRY_FILE = 'plugin.js';
 const MANIFEST_VERSION = 1;
 const INDEX_SCHEMA = 1;
-const SETTING_SCOPES = ['global', 'project', 'shared'];
+const SETTING_SCOPES = ['global', 'project'];
 
-const ZIP_TAIL_BYTES = 65557;
-const ZIP_CHUNK_BYTES = 4 * 1024 * 1024;
-const ZIP_BOMB_FLOOR_BYTES = 64 * 1024 * 1024;
-const ZIP_BOMB_RATIO = 100;
+const CFG = {
+  bytes: { KB: 1024, MB: 1048576, GB: 1073741824 },
+  zip: {
+    tail: 65557,
+    chunk: 4 * 1024 * 1024,
+    bombFloor: 64 * 1024 * 1024,
+    bombRatio: 100,
+  },
+  wasm: { moduleCacheMax: 8 },
+  rate: {
+    windowMs: 60000,
+    downloadPerMin: 20,
+    toastPerMin: 30,
+    fetchPerMin: 60,
+  },
+  gpu: { workerMax: 8 },
+  net: {
+    headerValueMax: 8192,
+    progressThreshold: 100 * 1024,
+    methods: new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']),
+  },
+  theme: {
+    assetMimeRe: /^image\/(png|jpeg|gif|webp|svg\+xml|avif)$/i,
+  },
+  delay: {
+    toastRestoreMs: 1500,
+    killFrameMs: 300,
+    revokeUrlMs: 10000,
+  },
+  panel: {
+    defaultHeight: 300,
+    baseFont: '13px/1.5 -apple-system,system-ui,"Segoe UI",sans-serif',
+    baseBg: '#141519',
+    baseFg: '#f4f5f7',
+  },
+  select: { rangeMax: 1000000 },
+  accept: { maxLen: 200 },
+  manifest: {
+    idMax: 64,
+    nameMax: 80,
+    versionMax: 32,
+    authorMax: 80,
+    descriptionMax: 300,
+    magicHexMax: 128,
+    magicTextMaxBytes: 64,
+    magicOffsetMax: 4096,
+    uiHeightMin: 120,
+    uiHeightMax: 600,
+    uiHeightDefault: 300,
+    commandLabelMax: 80,
+  },
+  settings: {
+    maxEntriesPerScope: 32,
+    maxTotalEntries: 64,
+    labelMax: 80,
+    descMax: 200,
+    placeholderMax: 200,
+    optionsMax: 50,
+    optionValueMax: 100,
+  },
+};
 
-const BOOT_TIMEOUT_MS = 8000;
-const CALL_TIMEOUT_DEFAULT_MS = 30000;
-const WASM_TIMEOUT_DEFAULT = 10000;
-const WASM_TIMEOUT_MIN = 1000;
-const WASM_TIMEOUT_MAX = 60000;
-const WASM_MODULE_CACHE_MAX = 8;
-
-const RATE_DOWNLOAD_PER_MIN = 20;
-const RATE_TOAST_PER_MIN = 30;
-const RATE_FETCH_PER_MIN = 60;
-const GPU_WORKER_MAX = 8;
-const NET_TIMEOUT_DEFAULT_MS = 30000;
-const NET_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
-const THEME_ASSET_MIME_RE = /^image\/(png|jpeg|gif|webp|svg\+xml|avif)$/i;
-
+const NET_METHODS = CFG.net.methods;
+const THEME_ASSET_MIME_RE = CFG.theme.assetMimeRe;
 const BUILTIN_EXTENSIONS = new Set(['.json', '.epub']);
 
 const FRAME_CSP = [
@@ -181,8 +226,8 @@ const Sha256 = (() => {
 
 async function sha256HexOfBlob(blob) {
   const s = Sha256.create();
-  for (let off = 0; off < blob.size; off += ZIP_CHUNK_BYTES) {
-    s.update(new Uint8Array(await blob.slice(off, off + ZIP_CHUNK_BYTES).arrayBuffer()));
+  for (let off = 0; off < blob.size; off += CFG.zip.chunk) {
+    s.update(new Uint8Array(await blob.slice(off, off + CFG.zip.chunk).arrayBuffer()));
   }
   return s.hex();
 }
@@ -192,7 +237,7 @@ const ZipReader = {
     if (!blob || typeof blob.slice !== 'function' || !Number.isFinite(blob.size)) throw new Error('Sumber paket tidak valid.');
     const size = blob.size;
     if (size < 22) throw new Error('File .zip tidak valid atau rusak.');
-    const tailLen = Math.min(size, ZIP_TAIL_BYTES);
+    const tailLen = Math.min(size, CFG.zip.tail);
     const tail = new Uint8Array(await blob.slice(size - tailLen).arrayBuffer());
     let eocd = -1;
     for (let i = tail.length - 22; i >= 0; i--) {
@@ -289,7 +334,7 @@ const ZipReader = {
       if (e.uncompSize && out.length !== e.uncompSize) throw new Error(`Paket rusak: ukuran "${e.name}" tidak cocok.`);
       return out;
     }
-    const budget = Math.max(ZIP_BOMB_FLOOR_BYTES, e.compSize * ZIP_BOMB_RATIO);
+    const budget = Math.max(CFG.zip.bombFloor, e.compSize * CFG.zip.bombRatio);
     const stream = blob.slice(dataStart, dataStart + e.compSize).stream().pipeThrough(new DecompressionStream('deflate-raw'));
     const reader = stream.getReader();
     const chunks = [];
@@ -567,20 +612,21 @@ const Manifest = {
     if (m.manifestVersion === undefined) errors.push('"manifestVersion" wajib diisi (gunakan 1).');
     else if (m.manifestVersion !== MANIFEST_VERSION) errors.push(`"manifestVersion" harus ${MANIFEST_VERSION} (ditemukan ${JSON.stringify(m.manifestVersion)}).`);
 
-    if (typeof m.id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(m.id)) {
-      errors.push('"id" wajib: huruf kecil/angka/garisbawah/tanda hubung, 1-64 karakter, diawali alfanumerik (contoh: "my-plugin").');
+    const idRe = new RegExp(`^[a-z0-9][a-z0-9_-]{0,${CFG.manifest.idMax - 1}}$`);
+    if (typeof m.id !== 'string' || !idRe.test(m.id)) {
+      errors.push(`"id" wajib: huruf kecil/angka/garisbawah/tanda hubung, 1-${CFG.manifest.idMax} karakter, diawali alfanumerik (contoh: "my-plugin").`);
     }
-    if (typeof m.name !== 'string' || !m.name.trim() || m.name.trim().length > 80) {
-      errors.push('"name" wajib diisi, 1-80 karakter.');
+    if (typeof m.name !== 'string' || !m.name.trim() || m.name.trim().length > CFG.manifest.nameMax) {
+      errors.push(`"name" wajib diisi, 1-${CFG.manifest.nameMax} karakter.`);
     }
-    if (typeof m.version !== 'string' || !m.version.trim() || m.version.trim().length > 32) {
-      errors.push('"version" wajib diisi, 1-32 karakter (disarankan semver, contoh: "1.0.0").');
+    if (typeof m.version !== 'string' || !m.version.trim() || m.version.trim().length > CFG.manifest.versionMax) {
+      errors.push(`"version" wajib diisi, 1-${CFG.manifest.versionMax} karakter (disarankan semver, contoh: "1.0.0").`);
     }
-    if (m.author != null && (typeof m.author !== 'string' || m.author.length > 80)) {
-      errors.push('"author" opsional, string maks 80 karakter.');
+    if (m.author != null && (typeof m.author !== 'string' || m.author.length > CFG.manifest.authorMax)) {
+      errors.push(`"author" opsional, string maks ${CFG.manifest.authorMax} karakter.`);
     }
-    if (m.description != null && (typeof m.description !== 'string' || m.description.length > 300)) {
-      errors.push('"description" opsional, string maks 300 karakter.');
+    if (m.description != null && (typeof m.description !== 'string' || m.description.length > CFG.manifest.descriptionMax)) {
+      errors.push(`"description" opsional, string maks ${CFG.manifest.descriptionMax} karakter.`);
     }
 
     if (typeof m.api !== 'number' || !Number.isInteger(m.api) || m.api < 1 || m.api > PLUGIN_API_VERSION) {
@@ -603,8 +649,8 @@ const Manifest = {
     if (m.extensions !== undefined) {
       if (!Array.isArray(m.extensions) || !m.extensions.length) {
         errors.push('"extensions" harus array tidak kosong (contoh: [".ks"]).');
-      } else if (m.extensions.length > 16) {
-        errors.push('"extensions" maksimal 16 entri.');
+      } else if (m.extensions.length > CFG.manifest.idMax / 4) {
+        errors.push(`"extensions" maksimal ${CFG.manifest.idMax / 4} entri.`);
       } else {
         for (const e of m.extensions) {
           if (typeof e !== 'string' || !/^\.[a-z0-9]{1,16}$/i.test(e)) {
@@ -621,8 +667,8 @@ const Manifest = {
     if (m.magic !== undefined) {
       if (!Array.isArray(m.magic) || !m.magic.length) {
         errors.push('"magic" harus array tidak kosong.');
-      } else if (m.magic.length > 16) {
-        errors.push('"magic" maksimal 16 entri.');
+      } else if (m.magic.length > CFG.manifest.idMax / 4) {
+        errors.push(`"magic" maksimal ${CFG.manifest.idMax / 4} entri.`);
       } else {
         m.magic.forEach((s, i) => {
           const res = Manifest.validateSig(s);
@@ -635,11 +681,11 @@ const Manifest = {
       if (!isPlainObject(m.ui)) {
         errors.push('"ui" harus objek { title?, height? }.');
       } else {
-        if (m.ui.title != null && (typeof m.ui.title !== 'string' || !m.ui.title.trim() || m.ui.title.length > 60)) {
-          errors.push('ui.title harus string 1-60 karakter.');
+        if (m.ui.title != null && (typeof m.ui.title !== 'string' || !m.ui.title.trim() || m.ui.title.length > CFG.settings.labelMax)) {
+          errors.push(`ui.title harus string 1-${CFG.settings.labelMax} karakter.`);
         }
-        if (m.ui.height != null && (typeof m.ui.height !== 'number' || !Number.isFinite(m.ui.height) || m.ui.height < 120 || m.ui.height > 600)) {
-          errors.push('ui.height harus angka 120-600 (piksel).');
+        if (m.ui.height != null && (typeof m.ui.height !== 'number' || !Number.isFinite(m.ui.height) || m.ui.height < CFG.manifest.uiHeightMin || m.ui.height > CFG.manifest.uiHeightMax)) {
+          errors.push(`ui.height harus angka ${CFG.manifest.uiHeightMin}-${CFG.manifest.uiHeightMax} (piksel).`);
         }
       }
     }
@@ -659,23 +705,23 @@ const Manifest = {
     if (hasHex) {
       if (typeof s.hex !== 'string') return { ok: false, error: 'hex harus string.' };
       const h = s.hex.replace(/\s+/g, '');
-      if (!h.length || h.length % 2 || h.length > 128 || !/^[0-9a-f]+$/i.test(h)) return { ok: false, error: 'hex harus heksadesimal genap, maks 64 byte (contoh: "504b0304").' };
+      if (!h.length || h.length % 2 || h.length > CFG.manifest.magicHexMax || !/^[0-9a-f]+$/i.test(h)) return { ok: false, error: `hex harus heksadesimal genap, maks ${CFG.manifest.magicHexMax / 2} byte (contoh: "504b0304").` };
     }
     if (hasText) {
       if (typeof s.text !== 'string' || !s.text.length) return { ok: false, error: 'text harus string tidak kosong.' };
-      if (new TextEncoder().encode(s.text).length > 64) return { ok: false, error: 'text maks 64 byte.' };
+      if (new TextEncoder().encode(s.text).length > CFG.manifest.magicTextMaxBytes) return { ok: false, error: `text maks ${CFG.manifest.magicTextMaxBytes} byte.` };
     }
-    if (s.offset != null && (!Number.isInteger(s.offset) || s.offset < 0 || s.offset > 4096)) {
-      return { ok: false, error: 'offset harus bilangan bulat 0-4096.' };
+    if (s.offset != null && (!Number.isInteger(s.offset) || s.offset < 0 || s.offset > CFG.manifest.magicOffsetMax)) {
+      return { ok: false, error: `offset harus bilangan bulat 0-${CFG.manifest.magicOffsetMax}.` };
     }
     return { ok: true };
   },
 
   validateSettings(raw) {
-    if (!isPlainObject(raw)) return ['"settings" harus objek { global?, project?, shared? }.'];
+    if (!isPlainObject(raw)) return ['"settings" harus objek { global?, project? }.'];
     const errors = [];
     for (const k of Object.keys(raw)) {
-      if (!SETTING_SCOPES.includes(k)) errors.push(`Kunci "settings.${k}" tidak dikenal — hanya "global", "project", dan "shared".`);
+      if (!SETTING_SCOPES.includes(k)) errors.push(`Kunci "settings.${k}" tidak dikenal — hanya "global" dan "project".`);
     }
     let total = 0;
     const keysByScope = new Map();
@@ -683,7 +729,7 @@ const Manifest = {
       const arr = raw[scope];
       if (arr === undefined) continue;
       if (!Array.isArray(arr)) { errors.push(`"settings.${scope}" harus array.`); continue; }
-      if (arr.length > 32) errors.push(`"settings.${scope}" maksimal 32 entri.`);
+      if (arr.length > CFG.settings.maxEntriesPerScope) errors.push(`"settings.${scope}" maksimal ${CFG.settings.maxEntriesPerScope} entri.`);
       total += arr.length;
       errors.push(...Manifest.validateSettingList(arr, `settings.${scope}`));
       for (const s of arr) {
@@ -692,7 +738,7 @@ const Manifest = {
         else keysByScope.set(s.key, scope);
       }
     }
-    if (total > 64) errors.push('Total entri settings maksimal 64.');
+    if (total > CFG.settings.maxTotalEntries) errors.push(`Total entri settings maksimal ${CFG.settings.maxTotalEntries}.`);
     return errors;
   },
 
@@ -708,21 +754,21 @@ const Manifest = {
       }
       if (seen.has(s.key)) { errors.push(`${a}.key: kunci "${s.key}" duplikat.`); return; }
       seen.add(s.key);
-      if (typeof s.label !== 'string' || !s.label.trim() || s.label.length > 80) errors.push(`${a}.label: wajib, 1-80 karakter.`);
+      if (typeof s.label !== 'string' || !s.label.trim() || s.label.length > CFG.settings.labelMax) errors.push(`${a}.label: wajib, 1-${CFG.settings.labelMax} karakter.`);
       const type = s.type ?? 'string';
       if (!types.includes(type)) errors.push(`${a}.type: harus salah satu dari ${types.join(', ')}.`);
-      if (s.description != null && (typeof s.description !== 'string' || s.description.length > 200)) errors.push(`${a}.description: maks 200 karakter.`);
-      if (s.placeholder != null && (typeof s.placeholder !== 'string' || s.placeholder.length > 200)) errors.push(`${a}.placeholder: maks 200 karakter.`);
+      if (s.description != null && (typeof s.description !== 'string' || s.description.length > CFG.settings.descMax)) errors.push(`${a}.description: maks ${CFG.settings.descMax} karakter.`);
+      if (s.placeholder != null && (typeof s.placeholder !== 'string' || s.placeholder.length > CFG.settings.placeholderMax)) errors.push(`${a}.placeholder: maks ${CFG.settings.placeholderMax} karakter.`);
       if (type === 'select') {
         if (!Array.isArray(s.options) || !s.options.length) {
           errors.push(`${a}.options: wajib untuk tipe select (minimal 1 pilihan).`);
-        } else if (s.options.length > 50) {
-          errors.push(`${a}.options: maksimal 50 pilihan.`);
+        } else if (s.options.length > CFG.settings.optionsMax) {
+          errors.push(`${a}.options: maksimal ${CFG.settings.optionsMax} pilihan.`);
         } else {
           for (const o of s.options) {
             const val = isPlainObject(o) ? o.value : o;
-            if (typeof val !== 'string' || !val.length || val.length > 100) {
-              errors.push(`${a}.options: setiap pilihan harus string ≤ 100 karakter (atau { value, label }).`); break;
+            if (typeof val !== 'string' || !val.length || val.length > CFG.settings.optionValueMax) {
+              errors.push(`${a}.options: setiap pilihan harus string ≤ ${CFG.settings.optionValueMax} karakter (atau { value, label }).`); break;
             }
           }
         }
@@ -741,8 +787,8 @@ const Manifest = {
     const settings = Manifest.normalizeSettings(m.settings);
     const magic = (m.magic || []).map(s => Manifest.normalizeSig(s)).filter(Boolean);
     const ui = isPlainObject(m.ui) ? {
-      ...(typeof m.ui.title === 'string' && m.ui.title.trim() ? { title: m.ui.title.trim().slice(0, 60) } : {}),
-      ...(typeof m.ui.height === 'number' && Number.isFinite(m.ui.height) ? { height: clampInt(m.ui.height, 120, 600, 300) } : {})
+      ...(typeof m.ui.title === 'string' && m.ui.title.trim() ? { title: m.ui.title.trim().slice(0, CFG.settings.labelMax) } : {}),
+      ...(typeof m.ui.height === 'number' && Number.isFinite(m.ui.height) ? { height: clampInt(m.ui.height, CFG.manifest.uiHeightMin, CFG.manifest.uiHeightMax, CFG.manifest.uiHeightDefault) } : {})
     } : null;
     return Object.assign({
       schema: INDEX_SCHEMA,
@@ -772,7 +818,7 @@ const Manifest = {
   },
 
   normalizeSettings(raw) {
-    const out = { global: [], project: [], shared: [] };
+    const out = { global: [], project: [] };
     if (!isPlainObject(raw)) return out;
     for (const scope of SETTING_SCOPES) {
       if (Array.isArray(raw[scope])) out[scope] = Manifest.normalizeSettingList(raw[scope]);
@@ -790,19 +836,19 @@ const Manifest = {
       const def = type === 'number' ? (Number(s.default) || 0)
         : type === 'boolean' ? !!s.default
         : String(s.default ?? '');
-      const entry = { key: s.key, label: s.label.trim().slice(0, 80), type, default: def };
+      const entry = { key: s.key, label: s.label.trim().slice(0, CFG.settings.labelMax), type, default: def };
       if (type === 'select' && Array.isArray(s.options)) {
-        entry.options = s.options.slice(0, 50).map(o => isPlainObject(o)
-          ? { value: String(o.value).slice(0, 100), label: String(o.label ?? o.value).slice(0, 100) }
-          : { value: String(o).slice(0, 100), label: String(o).slice(0, 100) });
+        entry.options = s.options.slice(0, CFG.settings.optionsMax).map(o => isPlainObject(o)
+          ? { value: String(o.value).slice(0, CFG.settings.optionValueMax), label: String(o.label ?? o.value).slice(0, CFG.settings.optionValueMax) }
+          : { value: String(o).slice(0, CFG.settings.optionValueMax), label: String(o).slice(0, CFG.settings.optionValueMax) });
       }
       if (type === 'number') {
         if (typeof s.min === 'number') entry.min = s.min;
         if (typeof s.max === 'number') entry.max = s.max;
         if (typeof s.step === 'number') entry.step = s.step;
       }
-      if (typeof s.placeholder === 'string') entry.placeholder = s.placeholder.slice(0, 200);
-      if (typeof s.description === 'string') entry.description = s.description.slice(0, 200);
+      if (typeof s.placeholder === 'string') entry.placeholder = s.placeholder.slice(0, CFG.settings.placeholderMax);
+      if (typeof s.description === 'string') entry.description = s.description.slice(0, CFG.settings.descMax);
       out.push(entry);
     }
     return out;
@@ -853,7 +899,7 @@ const Dialogs = {
           const prev = e.currentTarget.title;
           e.currentTarget.title = 'Tersalin!';
           host.ui.flash('Sidik jari disalin.');
-          setTimeout(() => { e.currentTarget.title = prev; }, 1500);
+          setTimeout(() => { e.currentTarget.title = prev; }, CFG.delay.toastRestoreMs);
         } catch {}
       });
       requestAnimationFrame(() => {
@@ -906,7 +952,6 @@ const Dialogs = {
     if (meta.ui) caps.push('<span class="cap-chip">Panel UI</span>');
     if (meta.settings.global.length) caps.push(`<span class="cap-chip">${meta.settings.global.length} setelan global</span>`);
     if (meta.settings.project.length) caps.push(`<span class="cap-chip">${meta.settings.project.length} setelan project</span>`);
-    if (meta.settings.shared.length) caps.push(`<span class="cap-chip">${meta.settings.shared.length} setelan bersama</span>`);
     if (meta.files.length) caps.push(`<span class="cap-chip">${meta.files.length} asset</span>`);
     if (meta.permissions.includes('wasm')) caps.push('<span class="cap-chip">WASM</span>');
 
@@ -1025,10 +1070,10 @@ function gpuWorkerHostMain() {
 
 function pluginFrameMain(token) {
   'use strict';
-  let plug = null, api = null, settings = {}, globalSettings = {}, sharedSettings = {}, pluginId = '', seq = 0, panelMounted = false;
+  let plug = null, api = null, settings = {}, globalSettings = {}, pluginId = '', seq = 0, panelMounted = false;
   const perms = new Set();
   const isPlainObject = v => !!v && typeof v === 'object' && !Array.isArray(v);
-  const PANEL_BASE_CSS = '*{box-sizing:border-box}html,body{margin:0;height:100%}body{font:13px/1.5 -apple-system,system-ui,"Segoe UI",sans-serif;background:var(--surface,#141519);color:var(--ink,#f4f5f7)}';
+  const PANEL_BASE_CSS = `*{box-sizing:border-box}html,body{margin:0;height:100%}body{font:${CFG.panel.baseFont};background:var(--surface,${CFG.panel.baseBg});color:var(--ink,${CFG.panel.baseFg})}`;
   const pending = new Map();
   const listeners = new Map();
   const encoder = new TextEncoder();
@@ -1180,7 +1225,6 @@ function pluginFrameMain(token) {
       pluginId = m.pluginId || '';
       settings = isPlainObject(m.settings) ? m.settings : {};
       globalSettings = isPlainObject(m.globalSettings) ? m.globalSettings : {};
-      sharedSettings = isPlainObject(m.sharedSettings) ? m.sharedSettings : {};
       perms.clear();
       if (Array.isArray(m.permissions)) for (const p of m.permissions) perms.add(p);
       enforceGpuGate();
@@ -1201,7 +1245,6 @@ function pluginFrameMain(token) {
         pluginId,
         get settings() { return settings; },
         get globalSettings() { return globalSettings; },
-        get sharedSettings() { return sharedSettings; },
         toast: msg => callHost('toast', [msg]),
         copy: gated('clipboard', 'copy'),
         copySelection: gated('workspace', 'copySelection'),
@@ -1280,7 +1323,7 @@ function pluginFrameMain(token) {
         for (const key of Object.keys(plug.commands)) {
           const cmd = plug.commands[key];
           if (cmd && typeof cmd === 'object' && typeof cmd.run === 'function') {
-            commands.push({ key, label: String(cmd.label || key).slice(0, 80) });
+            commands.push({ key, label: String(cmd.label || key).slice(0, CFG.manifest.commandLabelMax) });
           }
         }
       }
@@ -1302,7 +1345,6 @@ function pluginFrameMain(token) {
     settings(m) {
       settings = isPlainObject(m.settings) ? m.settings : {};
       globalSettings = isPlainObject(m.globalSettings) ? m.globalSettings : {};
-      sharedSettings = isPlainObject(m.sharedSettings) ? m.sharedSettings : {};
     },
     hook(m) {
       const fn = plug ? plug[m.name] : null;
@@ -1311,14 +1353,14 @@ function pluginFrameMain(token) {
     },
     extract(m) {
       if (!plug || typeof plug.extract !== 'function') throw new Error('Plugin tidak mendukung extract.');
-      return Promise.resolve(plug.extract({ fileName: m.fileName, buffer: m.buffer, settings, globalSettings, sharedSettings, api })).then(out => {
+      return Promise.resolve(plug.extract({ fileName: m.fileName, buffer: m.buffer, settings, globalSettings, api })).then(out => {
         if (!out || !Array.isArray(out.lines)) throw new Error('Plugin tidak mengembalikan lines array.');
         return out;
       });
     },
     pack(m) {
       if (!plug || typeof plug.pack !== 'function') throw new Error('Plugin tidak mendukung pack.');
-      return Promise.resolve(plug.pack({ lines: m.lines, sourceMap: m.sourceMap, projectName: m.projectName, settings, globalSettings, sharedSettings, api })).then(out => {
+      return Promise.resolve(plug.pack({ lines: m.lines, sourceMap: m.sourceMap, projectName: m.projectName, settings, globalSettings, api })).then(out => {
         if (!out || !(out.blob instanceof Blob)) throw new Error('Plugin tidak mengembalikan blob yang valid.');
         return { blob: out.blob, filename: out.filename || null };
       });
@@ -1408,9 +1450,8 @@ const GpuWorkers = {
       frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8">'
         + '<meta http-equiv="Content-Security-Policy" content="' + HELPER_CSP.replace(/"/g, '&quot;') + '">'
         + '</head><body><scr' + 'ipt>(' + gpuWorkerHostMain.toString() + ')();</scr' + 'ipt></body></html>';
-      const timer = setTimeout(() => reject(new Error('Host worker GPU gagal dimuat.')), BOOT_TIMEOUT_MS);
+      frame.addEventListener('error', () => reject(new Error('Host worker GPU gagal dimuat.')));
       frame.addEventListener('load', () => {
-        clearTimeout(timer);
         if (frame.contentWindow && typeof frame.contentWindow.__cstlGpuSpawn === 'function') resolve(frame.contentWindow);
         else reject(new Error('Host worker GPU gagal dimuat.'));
       });
@@ -1428,7 +1469,7 @@ const GpuWorkers = {
     else if (source instanceof Uint8Array) src = new TextDecoder().decode(source);
     else throw new Error('Sumber worker harus string, Blob, ArrayBuffer, atau Uint8Array.');
     if (!src.trim()) throw new Error('Sumber worker kosong.');
-    if (inst.gpuWorkers.size >= GPU_WORKER_MAX) throw new Error('Maksimal ' + GPU_WORKER_MAX + ' worker GPU aktif per plugin.');
+    if (inst.gpuWorkers.size >= CFG.gpu.workerMax) throw new Error('Maksimal ' + CFG.gpu.workerMax + ' worker GPU aktif per plugin.');
     const win = await GpuWorkers._window();
     const net = inst.meta.permissions.includes('net');
     const id = win.__cstlGpuSpawn('(' + gpuWorkerShim.toString() + ')(' + (net ? 'true' : 'false') + ');\n' + src, inst.token);
@@ -1490,10 +1531,11 @@ const Sandbox = {
     });
   },
 
-  async boot(meta, code, zip, parentEl, jszipSrc) {
+  async boot(meta, code, zip, parentEl, jszipSrc, cancelRef) {
     Sandbox.listen();
     let onReady = () => {};
-    const ready = new Promise(r => { onReady = r; });
+    let onReadyFail = null;
+    const ready = new Promise((res, rej) => { onReady = res; onReadyFail = rej; });
     const frame = document.createElement('iframe');
     frame.setAttribute('sandbox', 'allow-scripts');
     if (parentEl) {
@@ -1526,20 +1568,21 @@ const Sandbox = {
       hasPack: false,
       panelCard: parentEl ? parentEl.closest('.plugin-panel-card') : null,
       themeAssets: new Map(),
+      aborts: new Set(),
       onReady,
-      call(method, arg, timeoutMs) {
+      abort() {
+        try { if (onReadyFail) onReadyFail(new Error('Plugin dibatalkan.')); } catch {}
+        for (const [, p] of inst.pending) { try { p.reject(new Error('Dibatalkan.')); } catch {} }
+        inst.pending.clear();
+        for (const ac of inst.aborts) { try { ac.abort(); } catch {} }
+        inst.aborts.clear();
+      },
+      call(method, arg) {
         return new Promise((resolve, reject) => {
           const id = ++inst.seq;
-          const t = setTimeout(() => {
-            inst.pending.delete(id);
-            reject(new Error(`Plugin timeout: ${method} tidak merespons dalam ${Math.round((timeoutMs ?? CALL_TIMEOUT_DEFAULT_MS) / 1000)}s.`));
-          }, timeoutMs ?? CALL_TIMEOUT_DEFAULT_MS);
-          inst.pending.set(id, {
-            resolve: v => { clearTimeout(t); resolve(v); },
-            reject: e => { clearTimeout(t); reject(e); }
-          });
+          inst.pending.set(id, { resolve, reject });
           try { inst.win.postMessage({ v: 1, t: inst.token, q: 'call', id, method, arg }, '*'); }
-          catch (err) { clearTimeout(t); inst.pending.delete(id); reject(err); }
+          catch (err) { inst.pending.delete(id); reject(err); }
         });
       },
       reply(id, ok, val) {
@@ -1554,21 +1597,18 @@ const Sandbox = {
     (parentEl || document.body).appendChild(frame);
     inst.win = frame.contentWindow;
     Runtime._live.add(inst);
+    if (cancelRef) cancelRef.cancel = () => inst.abort();
     try {
-      await Promise.race([
-        ready,
-        new Promise((_, rej) => setTimeout(() => rej(new Error('Plugin gagal dimuat (timeout boot).')), BOOT_TIMEOUT_MS))
-      ]);
+      await ready;
       const info = await inst.call('init', {
         pluginId: meta.id,
         apiVersion: PLUGIN_API_VERSION,
         code,
         settings: Runtime.valuesFor(meta),
         globalSettings: Runtime.globalValuesFor(meta),
-        sharedSettings: Runtime.sharedValuesFor(meta),
         permissions: meta.permissions,
         jszip: meta.permissions.includes('jszip') ? jszipSrc : null
-      }, BOOT_TIMEOUT_MS);
+      });
       inst.info = info;
       inst.theme = info.theme;
       inst.cmdMeta = info.commands || [];
@@ -1590,9 +1630,10 @@ const Sandbox = {
     GpuWorkers.release(inst);
     if (inst.panelCard) { try { inst.panelCard.remove(); } catch {} }
     Sandbox._revokeThemeAssets(inst);
+    inst.abort();
     let killed = false;
     const kill = () => { if (!killed) { killed = true; try { inst.frame.remove(); } catch {} } };
-    setTimeout(kill, 300);
+    setTimeout(kill, CFG.delay.killFrameMs);
     inst.call('deactivate', {}).then(kill, kill);
   },
 
@@ -1698,7 +1739,7 @@ const NetRunner = {
       if (typeof k !== 'string' || !k) continue;
       const lk = k.toLowerCase();
       if (lk === 'host' || lk === 'content-length' || lk === 'connection' || lk === 'cookie' || lk === 'set-cookie' || lk === 'upgrade' || lk === 'te' || lk === 'trailer' || lk === 'transfer-encoding') continue;
-      out[k] = String(v).slice(0, 8192);
+      out[k] = String(v).slice(0, CFG.net.headerValueMax);
     }
     return out;
   },
@@ -1710,12 +1751,6 @@ const NetRunner = {
     if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
     if (isPlainObject(raw)) return JSON.stringify(raw);
     throw new Error('Body harus string, Uint8Array, ArrayBuffer, atau objek.');
-  },
-
-  _timeout(v) {
-    const n = Number(v);
-    if (!Number.isFinite(n) || n < 1000) return NET_TIMEOUT_DEFAULT_MS;
-    return Math.round(n);
   },
 
   _rangeHeader(range) {
@@ -1736,7 +1771,7 @@ const NetRunner = {
     throw new Error('Range tidak valid.');
   },
 
-  async fetch(rawUrl, opts) {
+  async fetch(rawUrl, opts, inst) {
     const o = isPlainObject(opts) ? opts : {};
     const u = NetRunner._validateUrl(rawUrl);
     const method = (typeof o.method === 'string' ? o.method : 'GET').toUpperCase();
@@ -1748,20 +1783,20 @@ const NetRunner = {
     const as = o.as === 'bytes' ? 'bytes' : 'text';
     const silent = !!o.silent;
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), NetRunner._timeout(o.timeoutMs));
+    if (inst) inst.aborts.add(ctrl);
     let res;
     try {
       res = await fetch(u.href, { method, headers, body, signal: ctrl.signal, redirect: 'follow', credentials: 'omit', cache: 'no-store', referrer: '', referrerPolicy: 'no-referrer' });
     } catch (err) {
-      clearTimeout(timer);
-      throw new Error('Permintaan gagal: ' + (err?.name === 'AbortError' ? 'timeout' : (err?.message || String(err))));
+      if (inst) inst.aborts.delete(ctrl);
+      throw new Error('Permintaan gagal: ' + (err?.name === 'AbortError' ? 'dibatalkan' : (err?.message || String(err))));
     }
-    clearTimeout(timer);
+    if (inst) inst.aborts.delete(ctrl);
     NetRunner._validateUrl(res.url);
     const headersOut = {};
     res.headers.forEach((v, k) => { headersOut[k] = v; });
     const total = Number(res.headers.get('content-length') || 0) || null;
-    const showProgress = !silent && (total == null || total >= 100 * 1024);
+    const showProgress = !silent && (total == null || total >= CFG.net.progressThreshold);
     if (showProgress) Downloads.start(u.hostname, total);
     let received = 0;
     let buf;
@@ -1847,14 +1882,14 @@ const WasmRunner = {
     try { mod = await WebAssembly.compile(bytes); }
     catch (e) { throw new Error('Kompilasi modul WASM gagal: ' + (e?.message || e)); }
     WasmRunner._moduleCache.set(key, mod);
-    while (WasmRunner._moduleCache.size > WASM_MODULE_CACHE_MAX) {
+    while (WasmRunner._moduleCache.size > CFG.wasm.moduleCacheMax) {
       const oldest = WasmRunner._moduleCache.keys().next().value;
       WasmRunner._moduleCache.delete(oldest);
     }
     return mod;
   },
 
-  async run(source, fn, input, opts) {
+  async run(source, fn, input, inst) {
     const bytes = source instanceof Uint8Array ? source
       : source instanceof ArrayBuffer ? new Uint8Array(source)
       : null;
@@ -1867,36 +1902,53 @@ const WasmRunner = {
     else if (input instanceof ArrayBuffer) inputBytes = new Uint8Array(input);
     else throw new Error('Input WASM harus string, Uint8Array, atau ArrayBuffer.');
 
-    const timeoutMs = clampInt(opts?.timeoutMs, WASM_TIMEOUT_MIN, WASM_TIMEOUT_MAX, WASM_TIMEOUT_DEFAULT);
     const mod = await WasmRunner.moduleFor(bytes);
+    const ctrl = new AbortController();
+    if (inst) inst.aborts.add(ctrl);
 
     return new Promise((resolve, reject) => {
       let worker;
+      let settled = false;
+      const cleanup = () => {
+        if (inst) inst.aborts.delete(ctrl);
+        ctrl.signal.removeEventListener('abort', onAbort);
+      };
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        try { worker.terminate(); } catch {}
+        reject(new Error('runWasm dibatalkan.'));
+      };
+      ctrl.signal.addEventListener('abort', onAbort);
       try { worker = new Worker(WasmRunner.workerUrl()); }
       catch (err) {
+        cleanup();
         reject(new Error('Worker WASM tidak dapat dibuat: ' + String((err && err.message) || err)));
         return;
       }
-      let timer = setTimeout(() => {
-        worker.terminate();
-        reject(new Error(`runWasm melebihi batas waktu ${timeoutMs} ms — eksekusi dibatalkan.`));
-      }, timeoutMs);
       worker.onmessage = ev => {
-        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        cleanup();
         worker.terminate();
         const d = ev.data || {};
         if (d.ok) resolve(d.output);
         else reject(new Error(d.error || 'runWasm gagal.'));
       };
       worker.onerror = ev => {
-        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        cleanup();
         worker.terminate();
         reject(new Error(ev.message || 'runWasm gagal.'));
       };
       try {
         worker.postMessage({ module: mod, fn, input: inputBytes }, [inputBytes.buffer]);
       } catch (err) {
-        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        cleanup();
         worker.terminate();
         reject(err);
       }
@@ -1922,14 +1974,15 @@ const Runtime = {
   async _loadStore() {
     const raw = await host.storage.readPluginSettings();
     const store = isPlainObject(raw) ? raw : {};
+    let dirty = false;
     for (const k of Object.keys(store)) {
       const e = store[k];
-      if (!isPlainObject(e)) { delete store[k]; continue; }
-      for (const sc of ['global', 'shared']) {
-        if (e[sc] !== undefined && !isPlainObject(e[sc])) delete e[sc];
-      }
+      if (!isPlainObject(e)) { delete store[k]; dirty = true; continue; }
+      if (e.global !== undefined && !isPlainObject(e.global)) { delete e.global; dirty = true; }
+      if (e.shared !== undefined) { delete e.shared; dirty = true; }
     }
     Runtime._store = store;
+    if (dirty) await Runtime._saveStore();
   },
 
   async _saveStore() {
@@ -2016,14 +2069,6 @@ const Runtime = {
     return out;
   },
 
-  sharedValuesFor(meta) {
-    const entry = isPlainObject(Runtime._store[meta.id]) ? Runtime._store[meta.id] : {};
-    const v = isPlainObject(entry.shared) ? entry.shared : {};
-    const out = {};
-    for (const s of (meta.settings?.shared || [])) out[s.key] = (s.key in v) ? v[s.key] : s.default;
-    return out;
-  },
-
   _setValues(id, values) {
     const next = { ...(host.state.pluginSettings() || {}) };
     if (values && typeof values === 'object' && Object.keys(values).length) next[id] = values;
@@ -2047,8 +2092,7 @@ const Runtime = {
     for (const inst of Runtime._instances.values()) {
       inst.call('settings', {
         settings: Runtime.valuesFor(inst.meta),
-        globalSettings: Runtime.globalValuesFor(inst.meta),
-        sharedSettings: Runtime.sharedValuesFor(inst.meta)
+        globalSettings: Runtime.globalValuesFor(inst.meta)
       }).catch(() => {});
     }
   },
@@ -2072,15 +2116,30 @@ const Runtime = {
       jszipSrc = await Runtime._jszipText();
     }
     const panelHostEl = meta.ui ? PluginUI.panelHost(meta) : null;
-    const inst = await Sandbox.boot(meta, code, zip, panelHostEl && panelHostEl.body, jszipSrc);
-    Runtime._instances.set(meta.id, inst);
+    const cancelRef = {};
+    host.util.progress.cancellable(
+      'Memuat plugin...',
+      `Mengaktifkan "${meta.name}"...`,
+      () => { try { cancelRef.cancel(); } catch {} }
+    );
+    let inst;
+    let activateErr = null;
     try {
-      await inst.call('activate', {});
+      inst = await Sandbox.boot(meta, code, zip, panelHostEl && panelHostEl.body, jszipSrc, cancelRef);
+      Runtime._instances.set(meta.id, inst);
+      try {
+        await inst.call('activate', {});
+      } catch (e) {
+        Runtime._instances.delete(meta.id);
+        Sandbox.destroy(inst);
+        activateErr = e;
+      }
     } catch (e) {
-      Runtime._instances.delete(meta.id);
-      Sandbox.destroy(inst);
+      host.util.progress.hide();
       throw e;
     }
+    host.util.progress.hide();
+    if (activateErr) throw activateErr;
     if (panelHostEl) PluginUI.wirePanel(inst, panelHostEl);
     Runtime.syncSettings();
   },
@@ -2259,7 +2318,7 @@ const Runtime = {
       bucket = {};
       Runtime._rateStore.set(id, bucket);
     }
-    const arr = (bucket[key] ||= []).filter(t => now - t < 60000);
+    const arr = (bucket[key] ||= []).filter(t => now - t < CFG.rate.windowMs);
     bucket[key] = arr;
     if (arr.length >= max) return false;
     arr.push(now);
@@ -2277,14 +2336,14 @@ const Runtime = {
 
     return {
       toast: msg => {
-        if (!Runtime._rateOk(inst.meta.id, 'toast', RATE_TOAST_PER_MIN)) throw new Error('Terlalu banyak notifikasi — coba lagi sebentar lagi.');
+        if (!Runtime._rateOk(inst.meta.id, 'toast', CFG.rate.toastPerMin)) throw new Error('Terlalu banyak notifikasi — coba lagi sebentar lagi.');
         host.ui.flash(String(msg ?? ''));
       },
       copy: gate('clipboard', text => host.util.clipboard(String(text ?? ''))),
       copySelection: gate('workspace', () => host.state.copyForAi()),
       selectRange: gate('workspace', (from, to) => {
         const f = Number(from), t = Number(to);
-        if (!Number.isInteger(f) || !Number.isInteger(t) || f < 1 || t < f || t - f > 1000000) throw new Error('Rentang baris tidak valid.');
+        if (!Number.isInteger(f) || !Number.isInteger(t) || f < 1 || t < f || t - f > CFG.select.rangeMax) throw new Error('Rentang baris tidak valid.');
         host.state.selectRangeUI(f, t);
       }),
       clearSelection: gate('workspace', () => host.state.clearSelection()),
@@ -2295,12 +2354,12 @@ const Runtime = {
       asset: async path => Runtime._readAsset(inst, path, 'uint8array'),
       assetText: async path => Runtime._readAsset(inst, path, 'string'),
 
-      runWasm: gate('wasm', (source, fn, input, opts) => {
-        return WasmRunner.run(source, fn, input, opts && typeof opts === 'object' ? opts : {});
+      runWasm: gate('wasm', (source, fn, input) => {
+        return WasmRunner.run(source, fn, input, inst);
       }),
       pickFile: gate('files', accept => Runtime.pickFile(accept)),
       download: gate('downloads', (data, filename) => {
-        if (!Runtime._rateOk(inst.meta.id, 'download', RATE_DOWNLOAD_PER_MIN)) throw new Error('Terlalu banyak unduhan — coba lagi sebentar lagi.');
+        if (!Runtime._rateOk(inst.meta.id, 'download', CFG.rate.downloadPerMin)) throw new Error('Terlalu banyak unduhan — coba lagi sebentar lagi.');
         return Runtime.download(data, filename);
       }),
       saveBlob: gate('storage', (key, data) => {
@@ -2328,8 +2387,8 @@ const Runtime = {
         return host.storage.blobExists(inst.meta.id, key);
       }),
       fetch: gate('net', (url, opts) => {
-        if (!Runtime._rateOk(inst.meta.id, 'fetch', RATE_FETCH_PER_MIN)) throw new Error('Terlalu banyak permintaan jaringan — coba lagi sebentar lagi.');
-        return NetRunner.fetch(url, opts);
+        if (!Runtime._rateOk(inst.meta.id, 'fetch', CFG.rate.fetchPerMin)) throw new Error('Terlalu banyak permintaan jaringan — coba lagi sebentar lagi.');
+        return NetRunner.fetch(url, opts, inst);
       }),
       gpuWorker: gate('gpu', source => GpuWorkers.spawn(inst, source)),
       gpuWorkerPost: gate('gpu', (id, data) => GpuWorkers.post(inst, id, data)),
@@ -2372,7 +2431,7 @@ const Runtime = {
     return new Promise(resolve => {
       const inp = document.createElement('input');
       inp.type = 'file';
-      if (accept && typeof accept === 'string') inp.accept = accept.slice(0, 200);
+      if (accept && typeof accept === 'string') inp.accept = accept.slice(0, CFG.accept.maxLen);
       inp.style.display = 'none';
       document.body.appendChild(inp);
       let settled = false;
@@ -2404,7 +2463,7 @@ const Runtime = {
     a.href = url;
     a.download = sanitizeName(filename, { stripTrailing: false, fallback: 'download' });
     a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    setTimeout(() => URL.revokeObjectURL(url), CFG.delay.revokeUrlMs);
   },
 
   resolveByExtension(fileName) {
@@ -2514,18 +2573,28 @@ const Runtime = {
     const inst = Runtime._instances.get(meta.id);
     if (!inst) throw new Error(`Plugin "${meta.name}" tidak aktif.`);
     if (!inst.hasExtract) throw new Error(`Plugin "${meta.name}" tidak mendukung extract.`);
-    const out = await inst.call('extract', { fileName: input.fileName, buffer: input.buffer }, 120000);
-    if (!out || !Array.isArray(out.lines)) throw new Error(`Plugin "${meta.name}" tidak mengembalikan lines array.`);
-    return out;
+    host.util.progress.enableCancel(() => inst.abort());
+    try {
+      const out = await inst.call('extract', { fileName: input.fileName, buffer: input.buffer });
+      if (!out || !Array.isArray(out.lines)) throw new Error(`Plugin "${meta.name}" tidak mengembalikan lines array.`);
+      return out;
+    } finally {
+      host.util.progress.disableCancel();
+    }
   },
 
   async callPack(meta, input) {
     const inst = Runtime._instances.get(meta.id);
     if (!inst) throw new Error(`Plugin "${meta.name}" tidak aktif.`);
     if (!inst.hasPack) throw new Error(`Plugin "${meta.name}" tidak mendukung pack.`);
-    const out = await inst.call('pack', { lines: input.lines, sourceMap: input.sourceMap, projectName: input.projectName }, 120000);
-    if (!out || !(out.blob instanceof Blob)) throw new Error(`Plugin "${meta.name}" tidak mengembalikan blob yang valid.`);
-    return out;
+    host.util.progress.enableCancel(() => inst.abort());
+    try {
+      const out = await inst.call('pack', { lines: input.lines, sourceMap: input.sourceMap, projectName: input.projectName });
+      if (!out || !(out.blob instanceof Blob)) throw new Error(`Plugin "${meta.name}" tidak mengembalikan blob yang valid.`);
+      return out;
+    } finally {
+      host.util.progress.disableCancel();
+    }
   },
 
   normalizePluginLines(raw, startNum) {
@@ -2708,8 +2777,7 @@ const PluginUI = {
     const panelBadge = p.ui ? '<span class="plugin-badge plugin-badge-panel" title="Menyediakan panel UI di panel Alat">Panel</span>' : '';
     const settingsBadges = [
       p.settings?.global?.length ? `<span class="plugin-badge plugin-badge-settings" title="Pengaturan global (semua project)">Setelan Global · ${p.settings.global.length}</span>` : '',
-      p.settings?.project?.length ? `<span class="plugin-badge plugin-badge-settings" title="Pengaturan per project">Setelan Project · ${p.settings.project.length}</span>` : '',
-      p.settings?.shared?.length ? `<span class="plugin-badge plugin-badge-settings" title="Pengaturan bersama (global & semua project)">Setelan Bersama · ${p.settings.shared.length}</span>` : ''
+      p.settings?.project?.length ? `<span class="plugin-badge plugin-badge-settings" title="Pengaturan per project">Setelan Project · ${p.settings.project.length}</span>` : ''
     ].filter(Boolean).join('');
     const assetsBadge = p.files.length
       ? `<span class="plugin-badge plugin-badge-package" title="${esc(p.files.join('\n'))}">Asset · ${p.files.length}</span>`
@@ -2767,7 +2835,7 @@ const PluginUI = {
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Setujui Izin
         </button>` : ''}
-        ${(p.settings?.global?.length || p.settings?.shared?.length) ? `<button type="button" class="btn btn-ghost btn-xs btn-plugin-global-settings" title="Pengaturan global plugin">
+        ${p.settings?.global?.length ? `<button type="button" class="btn btn-ghost btn-xs btn-plugin-global-settings" title="Pengaturan global plugin">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
           Setelan Global
         </button>` : ''}
@@ -2846,7 +2914,7 @@ const PluginUI = {
         <span class="plugin-panel-title">${esc(cfg.title || meta.name)}</span>
         <svg class="plugin-panel-chevron" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
       </button>
-      <div class="plugin-panel-body" style="height:${cfg.height || 300}px"></div>`;
+      <div class="plugin-panel-body" style="height:${cfg.height || CFG.panel.defaultHeight}px"></div>`;
     wrap.appendChild(card);
     return { card, body: card.querySelector('.plugin-panel-body') };
   },
@@ -2889,8 +2957,7 @@ const PluginUI = {
     }
     const active = Runtime.listMeta().filter(p => p.enabled === true);
     const settable = active.filter(p =>
-      (Array.isArray(p.settings?.project) && p.settings.project.length > 0) ||
-      (Array.isArray(p.settings?.shared) && p.settings.shared.length > 0)
+      Array.isArray(p.settings?.project) && p.settings.project.length > 0
     );
     if (settable.length) {
       if (cmds.length) html.push('<div class="dropdown-sep"></div>');
@@ -2955,10 +3022,8 @@ const PluginUI = {
 
   openSettings(meta, scope) {
     const ownFields = (scope === 'global') ? meta.settings?.global : meta.settings?.project;
-    const sharedFields = meta.settings?.shared;
     const hasOwn = Array.isArray(ownFields) && ownFields.length > 0;
-    const hasShared = Array.isArray(sharedFields) && sharedFields.length > 0;
-    if (!hasOwn && !hasShared) {
+    if (!hasOwn) {
       host.ui.flash(scope === 'global' ? 'Plugin ini tidak punya setelan global.' : 'Plugin ini tidak punya setelan project.');
       return;
     }
@@ -2967,26 +3032,13 @@ const PluginUI = {
       return;
     }
     const ownMerged = scope === 'global' ? Runtime.globalValuesFor(meta) : Runtime.valuesFor(meta);
-    const sharedMerged = Runtime.sharedValuesFor(meta);
     const scopeLabel = scope === 'global' ? 'Global' : 'Project';
     const form = document.createElement('div');
     form.className = 'plugin-settings-form';
-    if (hasOwn) {
-      const ownWrap = document.createElement('div');
-      ownWrap.className = 'plugin-settings-own';
-      for (const s of ownFields) ownWrap.appendChild(PluginUI._fieldRow(meta, s, ownMerged));
-      form.appendChild(ownWrap);
-    }
-    if (hasShared) {
-      const group = document.createElement('div');
-      group.className = 'plugin-settings-group';
-      const head = document.createElement('div');
-      head.className = 'plugin-settings-group-head';
-      head.innerHTML = `<span class="plugin-settings-group-title">Setelan Bersama</span><span class="plugin-settings-group-hint">Satu nilai untuk semua project dan workspace.</span>`;
-      group.appendChild(head);
-      for (const s of sharedFields) group.appendChild(PluginUI._fieldRow(meta, s, sharedMerged));
-      form.appendChild(group);
-    }
+    const ownWrap = document.createElement('div');
+    ownWrap.className = 'plugin-settings-own';
+    for (const s of ownFields) ownWrap.appendChild(PluginUI._fieldRow(meta, s, ownMerged));
+    form.appendChild(ownWrap);
 
     const overlay = document.createElement('div');
     overlay.className = 'backdrop backdrop-top';
@@ -3004,13 +3056,11 @@ const PluginUI = {
     const body = overlay.querySelector('.modal-body');
     const scopeHint = document.createElement('p');
     scopeHint.className = 'hint m-0 mt-1 mb-2';
-    if (!hasOwn) {
-      scopeHint.textContent = 'Setelan bersama — dipakai di semua project dan workspace.';
-    } else if (scope === 'global') {
-      scopeHint.textContent = hasShared ? 'Global berlaku untuk semua project; bagian bersama dipakai di mana saja.' : 'Berlaku untuk semua project.';
+    if (scope === 'global') {
+      scopeHint.textContent = 'Berlaku untuk semua project.';
     } else {
       const pn = host.state.projectName() || 'ini';
-      scopeHint.textContent = hasShared ? `Setelan project hanya untuk "${pn}"; bagian bersama berlaku di mana saja.` : `Hanya berlaku untuk project "${pn}".`;
+      scopeHint.textContent = `Hanya berlaku untuk project "${pn}".`;
     }
     body.append(scopeHint, form);
     document.body.appendChild(overlay);
@@ -3031,15 +3081,11 @@ const PluginUI = {
 
     overlay.querySelector('.btn-plugin-settings-cancel').addEventListener('click', close);
     overlay.querySelector('.btn-plugin-settings-reset').addEventListener('click', () => {
-      if (hasOwn) PluginUI._resetFields(meta, ownFields);
-      if (hasShared) PluginUI._resetFields(meta, sharedFields);
+      PluginUI._resetFields(meta, ownFields);
     });
     overlay.querySelector('.btn-plugin-settings-save').addEventListener('click', () => {
-      if (hasOwn) {
-        if (scope === 'global') Runtime._setScopeValues(meta.id, 'global', PluginUI._readFields(meta, ownFields));
-        else Runtime._setValues(meta.id, PluginUI._readFields(meta, ownFields));
-      }
-      if (hasShared) Runtime._setScopeValues(meta.id, 'shared', PluginUI._readFields(meta, sharedFields));
+      if (scope === 'global') Runtime._setScopeValues(meta.id, 'global', PluginUI._readFields(meta, ownFields));
+      else Runtime._setValues(meta.id, PluginUI._readFields(meta, ownFields));
       close();
       host.ui.flash(`Setelan ${scopeLabel.toLowerCase()} "${meta.name}" disimpan.`);
     });

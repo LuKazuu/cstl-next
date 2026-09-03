@@ -12,11 +12,40 @@ const SHORTCUTS_FILE = '_shortcuts.json';
 const DEFAULT_PROMPT = `Translate entire text to Native English. Euphemism prohibited. Onomatopoeia must be English-based. Result must be inside codeblock. Keep line numbering and format (like code in the middle of the text) intact.`;
 const DEFAULT_RINGKASAN_PROMPT = `Outside the <translate> and </translate> tags (placed above or below the translated lines), include updated summary of the characters and overall story so far. Any characters and story need to be preserved even though they don't appear again for context.`;
 const FIXED_FORMAT_PROMPT = `Format:\n<translate>\ntext\n</translate>`;
-const TOAST_TIMEOUT_MS = 3000;
-const SAVED_TIMEOUT_MS = 1800;
-const DASHBOARD_PAGE_SIZE = 30;
-const SCROLLER_OVERSCAN = 6;
 const DECODERS = ['utf-8', 'shift_jis', 'windows-31j', 'cp932'];
+
+const CFG = {
+  toastTimeoutMs: 3000,
+  savedTimeoutMs: 1800,
+  dashboardPageSize: 30,
+  scroller: {
+    overscan: 6,
+    defaultH: 80,
+    gap: 8,
+    topPad: 8,
+    botPad: 12,
+    headerH: 32,
+    maxRenderPasses: 5,
+    defaultViewportH: 800,
+    recyclePos: -9999,
+  },
+  delay: {
+    alertMs: 10,
+    repositionMs: 50,
+    focusMs: 30,
+    reloadMs: 800,
+    revokeUrlMs: 10000,
+    dashboardSearchMs: 180,
+    proofreadDebounceMs: 200,
+    storageWatchMs: 4000,
+  },
+  chunkSize: { lines: 5000, projects: 1, importBatch: 50, fileProgressBatch: 10 },
+  warningDisplayMax: 10,
+  skippedFilesDisplayMax: 5,
+  keyboard: { arrowDelayMs: 30, escapeDelayMs: 10 },
+  storage: { criticalFreeMb: 10, safeFreeMb: 80 },
+  debounceDefaultMs: 200,
+};
 
 const SETTINGS_FIELDS = [
   { id: 'settingsIgnoreNameCheck',    key: 'ignoreName',       type: 'check',  def: false },
@@ -156,7 +185,7 @@ function download(url, name) {
   a.href = url;
   a.download = name;
   a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  setTimeout(() => URL.revokeObjectURL(url), CFG.delay.revokeUrlMs);
 }
 
 function clipboard(text) {
@@ -171,7 +200,7 @@ function clipboard(text) {
   finally { document.body.removeChild(ta); }
 }
 
-function debounce(fn, ms = 200) {
+function debounce(fn, ms = CFG.debounceDefaultMs) {
   let t;
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
@@ -193,7 +222,7 @@ async function withProgress(title, initialMsg, fn, failMsg) {
   if (err) {
     els.copyStatus.classList.add('empty');
     const msg = err?.storage ? err.message : (failMsg ? failMsg(err) : err.message);
-    setTimeout(() => alert(msg), 10);
+    setTimeout(() => alert(msg), CFG.delay.alertMs);
     if (err?.storage) App.loadDashboard();
     return undefined;
   }
@@ -1041,7 +1070,7 @@ async function parseFilesList(files, existing, start, onProgress, label = 'file'
     if (parsed.lines.length) { existing.add(bn); imported.push(...parsed.lines); cur += parsed.lines.length; }
     invalidEntries += parsed.skipped;
     onProgress(`${i + 1} / ${sorted.length} ${label}`, ((i + 1) / sorted.length) * 100);
-    if (i % 50 === 0) await yieldToEvent();
+    if (i % CFG.chunkSize.importBatch === 0) await yieldToEvent();
   }
   return { imported, skipped, invalidEntries, nextStart: cur, existing: Array.from(existing) };
 }
@@ -1143,7 +1172,7 @@ async function buildExportJson(lines, projectName, onProgress) {
       content: JSON.stringify(out, null, 2)
     };
     onProgress(`${i + 1} / ${entries.length} file`, ((i + 1) / entries.length) * 100);
-    if (i % 50 === 0) await yieldToEvent();
+    if (i % CFG.chunkSize.importBatch === 0) await yieldToEvent();
   }
   if (results.length > 1) {
     onProgress('Mengompres ZIP...', 100);
@@ -1338,7 +1367,7 @@ async function restoreOne(zip, fallbackName, onProgress) {
         is_translated: !!trans[i]?.trim()
       });
     }
-    if (onProgress && (i % 5000 === 0)) { onProgress(i, total); await yieldToEvent(); }
+    if (onProgress && (i % CFG.chunkSize.lines === 0)) { onProgress(i, total); await yieldToEvent(); }
   }
   const finalLines = lines.filter(x => x !== null);
 
@@ -1756,7 +1785,7 @@ const Shortcuts = {
     Shortcuts._statusTimer = setTimeout(() => {
       el.hidden = true;
       el.classList.remove('error');
-    }, 3000);
+    }, CFG.toastTimeoutMs);
   }
 };
 
@@ -1802,7 +1831,7 @@ function cacheEls() {
     'btnOpenPlugins', 'pluginMenu',
     'opfsExplorerModal', 'btnOpfsExplorerOpen', 'btnOpfsExplorerClose',
     'opfsList', 'opfsEmpty', 'opfsEmptyText', 'opfsCrumbs', 'opfsLoading', 'btnOpfsRefresh',
-    'busyOverlay', 'busyTitle', 'busyMsg', 'busyBarFill',
+    'busyOverlay', 'busyTitle', 'busyMsg', 'busyBarFill', 'busyActions', 'busyCancel',
     'btnBookmarks', 'bookmarkPanel',
     'bookmarkPanelCount', 'bookmarkList', 'btnBookmarkClear'
   ];
@@ -1812,22 +1841,48 @@ function cacheEls() {
 }
 
 const Progress = {
-  _open(title, msg, determinate) {
+  _onCancel: null,
+  _open(title, msg, determinate, onCancel) {
     els.busyTitle.textContent = title;
     els.busyMsg.textContent = msg;
     els.busyBarFill.classList.toggle('determinate', determinate);
     els.busyBarFill.style.width = determinate ? '0%' : '';
+    Progress._onCancel = typeof onCancel === 'function' ? onCancel : null;
+    els.busyActions.hidden = !Progress._onCancel;
+    els.busyCancel.disabled = false;
     els.busyOverlay.classList.add('open');
   },
   show(title, msg = '') { Progress._open(title, msg, false); },
   determinate(title, msg = '') { Progress._open(title, msg, true); },
+  cancellable(title, msg, onCancel) { Progress._open(title, msg, false, onCancel); },
   update(msg, pct) {
     if (msg !== undefined && typeof msg === 'string') els.busyMsg.textContent = msg;
     if (pct !== undefined && els.busyBarFill.classList.contains('determinate')) {
       els.busyBarFill.style.width = Math.min(100, Math.max(0, pct)) + '%';
     }
   },
-  hide() { els.busyOverlay.classList.remove('open'); }
+  enableCancel(onCancel) {
+    if (typeof onCancel !== 'function') return;
+    Progress._onCancel = onCancel;
+    els.busyActions.hidden = false;
+    els.busyCancel.disabled = false;
+  },
+  disableCancel() {
+    Progress._onCancel = null;
+    els.busyActions.hidden = true;
+  },
+  cancel() {
+    const cb = Progress._onCancel;
+    Progress.disableCancel();
+    if (typeof cb === 'function') {
+      try { cb(); } catch (e) { console.error('[progress] onCancel error:', e); }
+    }
+  },
+  hide() {
+    Progress.disableCancel();
+    els.busyCancel.disabled = false;
+    els.busyOverlay.classList.remove('open');
+  }
 };
 
 const State = {
@@ -1997,11 +2052,15 @@ class Scroller {
     this.els = [];
     this.indices = [];
     this.heightCache = new Map();
-    this.defaultH = 80;
-    this.gap = 8;
-    this.topPad = 8;
-    this.botPad = 12;
-    this.overscan = SCROLLER_OVERSCAN;
+    this.defaultH = CFG.scroller.defaultH;
+    this.gap = CFG.scroller.gap;
+    this.topPad = CFG.scroller.topPad;
+    this.botPad = CFG.scroller.botPad;
+    this.headerH = CFG.scroller.headerH;
+    this.overscan = CFG.scroller.overscan;
+    this.recyclePos = CFG.scroller.recyclePos;
+    this.maxPasses = CFG.scroller.maxRenderPasses;
+    this.defaultVH = CFG.scroller.defaultViewportH;
     this.scrollTop = 0;
     this.totalH = 0;
     this.scheduled = false;
@@ -2035,9 +2094,9 @@ class Scroller {
     this.items = items;
     this.keys = items.map((it, i) => this.keyOf(it, i));
     this.heights = items.map((it, i) => {
-      if (!keep) return it?.type === 'header' ? 32 : this.defaultH;
+      if (!keep) return it?.type === 'header' ? this.headerH : this.defaultH;
       const cached = this.heightCache.get(this.keys[i]);
-      return cached !== undefined ? cached : (it?.type === 'header' ? 32 : this.defaultH);
+      return cached !== undefined ? cached : (it?.type === 'header' ? this.headerH : this.defaultH);
     });
     if (!keep) this.heightCache.clear();
     this.pos = new Array(items.length);
@@ -2049,6 +2108,14 @@ class Scroller {
   }
 
   invalidate() { this.indices.fill(-1); }
+
+  forceFresh() {
+    this.heightCache.clear();
+    this.heights = this.items.map(it => it?.type === 'header' ? this.headerH : this.defaultH);
+    this.updatePos();
+    this.invalidate();
+    this.render();
+  }
 
   updatePos() {
     let cur = this.topPad;
@@ -2080,7 +2147,7 @@ class Scroller {
 
   render() {
     let more = true, passes = 0;
-    while (more && passes < 5) {
+    while (more && passes < this.maxPasses) {
       more = this._renderPass();
       passes++;
     }
@@ -2090,7 +2157,7 @@ class Scroller {
   _renderPass() {
     if (!this.items.length) {
       for (let i = 0; i < this.els.length; i++) {
-        this.els[i].style.transform = 'translateY(-9999px)';
+        this.els[i].style.transform = `translateY(${this.recyclePos}px)`;
         this.indices[i] = -1;
       }
       this.container.style.height = '0px';
@@ -2098,7 +2165,7 @@ class Scroller {
       return false;
     }
 
-    const vh = this.vp.clientHeight || 800;
+    const vh = this.vp.clientHeight || this.defaultVH;
     const scrollTop = this.scrollTop;
     const vStart = this.findStart(scrollTop);
     const vEnd = this.findEnd(vStart, vh);
@@ -2108,7 +2175,7 @@ class Scroller {
 
     while (this.els.length < need) {
       const el = this.create();
-      el.style.transform = 'translateY(-9999px)';
+      el.style.transform = `translateY(${this.recyclePos}px)`;
       this.els.push(el);
       this.indices.push(-1);
       this.container.appendChild(el);
@@ -2121,17 +2188,6 @@ class Scroller {
         this.update(this.els[i], this.items[di], di);
         this.indices[i] = di;
         toMeasure.push(i);
-      }
-    }
-
-    for (let i = 0; i < need; i++) {
-      this.els[i].style.transform = `translateY(${this.pos[rStart + i]}px)`;
-    }
-
-    for (let i = need; i < this.els.length; i++) {
-      if (this.indices[i] !== -1) {
-        this.els[i].style.transform = 'translateY(-9999px)';
-        this.indices[i] = -1;
       }
     }
 
@@ -2153,9 +2209,20 @@ class Scroller {
     if (heightsChanged) {
       this.updatePos();
       if (adjust) { this.vp.scrollTop += adjust; this.scrollTop = this.vp.scrollTop; }
-      for (let i = 0; i < need; i++) {
-        this.els[i].style.transform = `translateY(${this.pos[rStart + i]}px)`;
+    }
+
+    for (let i = 0; i < need; i++) {
+      this.els[i].style.transform = `translateY(${this.pos[rStart + i]}px)`;
+    }
+
+    for (let i = need; i < this.els.length; i++) {
+      if (this.indices[i] !== -1) {
+        this.els[i].style.transform = `translateY(${this.recyclePos}px)`;
+        this.indices[i] = -1;
       }
+    }
+
+    if (heightsChanged) {
       const vBot = this.scrollTop + vh;
       const lastBot = rEnd < this.items.length
         ? this.pos[rEnd - 1] + this.heights[rEnd - 1]
@@ -2167,7 +2234,7 @@ class Scroller {
 
   scrollToIndex(idx) {
     if (idx < 0 || idx >= this.items.length) return;
-    const vh = this.vp.clientHeight || 800;
+    const vh = this.vp.clientHeight || this.defaultVH;
     const center = (i) => Math.max(0, (this.pos[i] || 0) - (vh / 2) + (this.heights[i] / 2));
     const apply = () => {
       this.vp.scrollTop = center(idx);
@@ -2290,7 +2357,7 @@ const Importer = {
         }
       }
       Progress.update(`${i + 1} / ${sorted.length} file`, ((i + 1) / sorted.length) * 100);
-      if (i % 10 === 0) await yieldToEvent();
+      if (i % CFG.chunkSize.fileProgressBatch === 0) await yieldToEvent();
     }
     State.pluginData = pluginData;
     return { imported, skipped: [], existing: Array.from(existing), images };
@@ -2389,10 +2456,10 @@ const Importer = {
         CSTL.plugins.emit('import', { lineCount: result.imported.length, fileCount: (result.existing || existing).length });
       } else if (result.skipped.length) {
         els.copyStatus.classList.add('empty');
-        setTimeout(() => alert(`Gagal impor: File duplikat.\n- ${result.skipped.slice(0, 5).join('\n- ')}`), 10);
+        setTimeout(() => alert(`Gagal impor: File duplikat.\n- ${result.skipped.slice(0, CFG.skippedFilesDisplayMax).join('\n- ')}`), CFG.delay.alertMs);
       } else if (result.invalidEntries) {
         els.copyStatus.classList.add('empty');
-        setTimeout(() => alert(`Tidak ada baris valid yang dapat diimpor. ${result.invalidEntries} entri tidak memiliki field "message".`), 10);
+        setTimeout(() => alert(`Tidak ada baris valid yang dapat diimpor. ${result.invalidEntries} entri tidak memiliki field "message".`), CFG.delay.alertMs);
       } else {
         App.flash('Tidak ada data valid.', false);
       }
@@ -2457,6 +2524,7 @@ const App = {
   activeLine: null,
   highlightRe: null,
   lastQuery: '',
+  lastProofreadSig: '',
   lastFile: null,
   fileCache: null,
   toastToken: 0,
@@ -2480,7 +2548,7 @@ const App = {
     el.textContent = msg;
     el.classList.remove('empty');
     const t = ++App.toastToken;
-    if (!keep) setTimeout(() => { if (App.toastToken === t) el.classList.add('empty'); }, TOAST_TIMEOUT_MS);
+    if (!keep) setTimeout(() => { if (App.toastToken === t) el.classList.add('empty'); }, CFG.toastTimeoutMs);
   },
 
   flashSaved() {
@@ -2488,7 +2556,7 @@ const App = {
     if (!bar || !State.projectId) return;
     bar.classList.add('saved');
     clearTimeout(App.savedTimer);
-    App.savedTimer = setTimeout(() => bar.classList.remove('saved'), SAVED_TIMEOUT_MS);
+    App.savedTimer = setTimeout(() => bar.classList.remove('saved'), CFG.savedTimeoutMs);
   },
 
   async init() {
@@ -2557,6 +2625,7 @@ const App = {
   },
 
   bindToolbar() {
+    els.busyCancel.addEventListener('click', () => Progress.cancel());
     els.btnNewProject.addEventListener('click', App.createProject);
     els.btnBackToDashboard.addEventListener('click', App.closeProject);
     els.btnToggleHeader.addEventListener('click', () => {
@@ -2573,7 +2642,7 @@ const App = {
     let searchTimer = null;
     els.projectSearch.addEventListener('input', () => {
       clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => App.renderDashboardItems(), 180);
+      searchTimer = setTimeout(() => App.renderDashboardItems(), CFG.delay.dashboardSearchMs);
     });
     els.projectSearchClear.addEventListener('click', () => {
       els.projectSearch.value = '';
@@ -2636,7 +2705,7 @@ const App = {
       menu.classList.add('open');
       trigger.setAttribute('aria-expanded', 'true');
       const active = menu.querySelector('.sort-menu-item.active');
-      if (active) setTimeout(() => active.focus(), 30);
+      if (active) setTimeout(() => active.focus(), CFG.delay.focusMs);
     };
     const toggleMenu = () => {
       if (box.classList.contains('open')) closeMenu();
@@ -2737,7 +2806,7 @@ const App = {
         menu.style.left = '0';
       }
     };
-    trigger.addEventListener('click', () => setTimeout(reposition, 50));
+    trigger.addEventListener('click', () => setTimeout(reposition, CFG.delay.repositionMs));
     window.addEventListener('resize', reposition);
   },
 
@@ -2952,7 +3021,7 @@ const App = {
     });
     els.btnProofreadReplaceAll.addEventListener('click', App.replaceAll);
 
-    const delayedRender = debounce(App.renderProofread, 200);
+    const delayedRender = debounce(App.renderProofread, CFG.delay.proofreadDebounceMs);
     els.proofreadSearchInput.addEventListener('input', delayedRender);
     PROOFREAD_FIELDS.forEach(({ id }) => {
       els[id].addEventListener('change', () => { App.syncProofread(); App.renderProofread(); });
@@ -3372,10 +3441,10 @@ const App = {
     if (!est || !est.quota) return;
     const free = (est.quota || 0) - (est.usage || 0);
     const freeMb = free / (1024 * 1024);
-    if (freeMb < 10 && !App._storageCriticalShown) {
+    if (freeMb < CFG.storage.criticalFreeMb && !App._storageCriticalShown) {
       App._storageCriticalShown = true;
       App.flash(`Penyimpanan kritis (${freeMb.toFixed(0)} MB bebas). Sebagian tulisan mungkin gagal tersimpan — ekspor project sebagai cadangan.`);
-    } else if (freeMb > 80) {
+    } else if (freeMb > CFG.storage.safeFreeMb) {
       App._storageCriticalShown = false;
     }
   },
@@ -3390,7 +3459,7 @@ const App = {
     App.storageWatchTimer = setInterval(() => {
       if (document.hidden) return;
       App.checkStorageAlive();
-    }, 4000);
+    }, CFG.delay.storageWatchMs);
   },
 
   stopStorageWatch() {
@@ -3405,7 +3474,7 @@ const App = {
       if (ok) return;
       if (/[?&]heal=1/.test(location.search)) return;
       history.replaceState(null, '', location.pathname + (location.search || '') + (location.search ? '&' : '?') + 'heal=1');
-      setTimeout(() => location.reload(), 800);
+      setTimeout(() => location.reload(), CFG.delay.reloadMs);
     }).catch(() => {});
   },
 
@@ -3557,7 +3626,7 @@ const App = {
     if (!sentinel) return;
 
     const start = App.dashboardRendered;
-    const end = Math.min(start + DASHBOARD_PAGE_SIZE, App.dashboardItems.length);
+    const end = Math.min(start + CFG.dashboardPageSize, App.dashboardItems.length);
     const frag = document.createDocumentFragment();
     for (let i = start; i < end; i++) {
       frag.appendChild(App.buildProjectCard(App.dashboardItems[i]));
@@ -3703,7 +3772,7 @@ const App = {
       return r;
     }, e => friendlyError(e, 'Gagal backup: '));
     if (result?.warnings?.length) {
-      setTimeout(() => alert('Backup selesai dengan catatan:\n- ' + result.warnings.join('\n- ')), 50);
+      setTimeout(() => alert('Backup selesai dengan catatan:\n- ' + result.warnings.join('\n- ')), CFG.delay.alertMs);
     }
   },
 
@@ -3715,7 +3784,7 @@ const App = {
       return r;
     }, e => e.message === 'Belum ada Project untuk di-backup.' ? e.message : friendlyError(e, 'Gagal backup semua project: '));
     if (result?.warnings?.length) {
-      setTimeout(() => alert('Backup selesai dengan catatan:\n- ' + result.warnings.join('\n- ')), 50);
+      setTimeout(() => alert('Backup selesai dengan catatan:\n- ' + result.warnings.join('\n- ')), CFG.delay.alertMs);
     }
   },
 
@@ -4162,7 +4231,7 @@ const App = {
 
     const { results, errors, seen, ringkasan } = App.parseAi(raw, State.byNum);
     if (!results.length) {
-      if (errors.length) return alert('DITOLAK:\n' + errors.slice(0, 10).join('\n') + (errors.length > 10 ? `\n+${errors.length - 10} error lainnya` : ''));
+      if (errors.length) return alert('DITOLAK:\n' + errors.slice(0, CFG.warningDisplayMax).join('\n') + (errors.length > CFG.warningDisplayMax ? `\n+${errors.length - CFG.warningDisplayMax} error lainnya` : ''));
       return alert('Tidak ada data valid.');
     }
 
@@ -4184,7 +4253,7 @@ const App = {
       else updates.push({ line: l, item: r });
     });
 
-    if (errors.length) return alert('DITOLAK:\n' + errors.slice(0, 10).join('\n') + (errors.length > 10 ? `\n+${errors.length - 10} error lainnya` : ''));
+    if (errors.length) return alert('DITOLAK:\n' + errors.slice(0, CFG.warningDisplayMax).join('\n') + (errors.length > CFG.warningDisplayMax ? `\n+${errors.length - CFG.warningDisplayMax} error lainnya` : ''));
 
     State.undo = snapshot();
     State.redo = null;
@@ -4361,9 +4430,12 @@ const App = {
 
     const matches = proofreadSearch(State.lines, q, regex, exact, caseSensitive, scope, translatedOnly);
     els.proofreadStatus.textContent = `Ditemukan ${matches.length} baris.`;
-    const changed = q !== App.lastQuery;
+    const sig = `${q}\u0001${regex}\u0002${exact}\u0003${caseSensitive}\u0004${translatedOnly}\u0005${scope}`;
+    const changed = sig !== App.lastProofreadSig;
+    App.lastProofreadSig = sig;
     App.lastQuery = q;
-    App.pr.setItems(matches, !changed);
+    if (changed) App.pr.setItems(matches, false);
+    else App.pr.setItems(matches, true);
   },
 
   createPrRow() {
