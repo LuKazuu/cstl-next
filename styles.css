@@ -1816,7 +1816,6 @@ select:hover:not(:disabled) { border-color: var(--hairline-3); }
   background: var(--surface-2);
   color: var(--ink);
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
 }
@@ -1826,7 +1825,6 @@ select:hover:not(:disabled) { border-color: var(--hairline-3); }
   color: var(--accent);
 }
 .btn-busy-cancel:active:not(:disabled) {
-  transform: scale(0.98);
   background: var(--surface-3);
 }
 .btn-busy-cancel:disabled {
