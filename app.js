@@ -2109,14 +2109,6 @@ class Scroller {
 
   invalidate() { this.indices.fill(-1); }
 
-  forceFresh() {
-    this.heightCache.clear();
-    this.heights = this.items.map(it => it?.type === 'header' ? this.headerH : this.defaultH);
-    this.updatePos();
-    this.invalidate();
-    this.render();
-  }
-
   updatePos() {
     let cur = this.topPad;
     for (let i = 0; i < this.items.length; i++) {
@@ -2523,7 +2515,6 @@ const App = {
   pr: null,
   activeLine: null,
   highlightRe: null,
-  lastQuery: '',
   lastProofreadSig: '',
   lastFile: null,
   fileCache: null,
@@ -4433,7 +4424,6 @@ const App = {
     const sig = `${q}\u0001${regex}\u0002${exact}\u0003${caseSensitive}\u0004${translatedOnly}\u0005${scope}`;
     const changed = sig !== App.lastProofreadSig;
     App.lastProofreadSig = sig;
-    App.lastQuery = q;
     if (changed) App.pr.setItems(matches, false);
     else App.pr.setItems(matches, true);
   },

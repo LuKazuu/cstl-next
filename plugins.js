@@ -1068,12 +1068,16 @@ function gpuWorkerHostMain() {
   };
 }
 
-function pluginFrameMain(token) {
+const PLUGIN_FRAME_PANEL_CSS = `*{box-sizing:border-box}html,body{margin:0;height:100%}body{font:${CFG.panel.baseFont};background:var(--surface,${CFG.panel.baseBg});color:var(--ink,${CFG.panel.baseFg})}`;
+const PLUGIN_FRAME_CMD_LABEL_MAX = CFG.manifest.commandLabelMax;
+
+function pluginFrameMain(token, panelCss, cmdLabelMax) {
   'use strict';
   let plug = null, api = null, settings = {}, globalSettings = {}, pluginId = '', seq = 0, panelMounted = false;
   const perms = new Set();
   const isPlainObject = v => !!v && typeof v === 'object' && !Array.isArray(v);
-  const PANEL_BASE_CSS = `*{box-sizing:border-box}html,body{margin:0;height:100%}body{font:${CFG.panel.baseFont};background:var(--surface,${CFG.panel.baseBg});color:var(--ink,${CFG.panel.baseFg})}`;
+  const PANEL_BASE_CSS = panelCss;
+  const COMMAND_LABEL_MAX = cmdLabelMax;
   const pending = new Map();
   const listeners = new Map();
   const encoder = new TextEncoder();
@@ -1323,7 +1327,7 @@ function pluginFrameMain(token) {
         for (const key of Object.keys(plug.commands)) {
           const cmd = plug.commands[key];
           if (cmd && typeof cmd === 'object' && typeof cmd.run === 'function') {
-            commands.push({ key, label: String(cmd.label || key).slice(0, CFG.manifest.commandLabelMax) });
+            commands.push({ key, label: String(cmd.label || key).slice(0, COMMAND_LABEL_MAX) });
           }
         }
       }
@@ -1549,7 +1553,7 @@ const Sandbox = {
     const token = crypto.randomUUID();
     frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8">'
       + '<meta http-equiv="Content-Security-Policy" content="' + FRAME_CSP.replace(/"/g, '&quot;') + '">'
-      + '</head><body><script>(' + pluginFrameMain.toString() + ')(' + JSON.stringify(token) + ');<\/script></body></html>';
+      + '</head><body><script>(' + pluginFrameMain.toString() + ')(' + JSON.stringify(token) + ', ' + JSON.stringify(PLUGIN_FRAME_PANEL_CSS) + ', ' + JSON.stringify(PLUGIN_FRAME_CMD_LABEL_MAX) + ');<\/script></body></html>';
 
     const inst = {
       frame,
