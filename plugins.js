@@ -3195,7 +3195,7 @@ const PluginUI = {
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Setujui Izin
         </button>` : ''}
-        ${(p.settings?.global?.length || p.settings?.project?.length) ? `<button type="button" class="btn btn-ghost btn-xs btn-plugin-settings" title="Pengaturan plugin">
+        ${(p.settings?.global?.length || (p.settings?.project?.length && host.state.projectId())) ? `<button type="button" class="btn btn-ghost btn-xs btn-plugin-settings" title="Pengaturan plugin">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
           Setelan
         </button>` : ''}
