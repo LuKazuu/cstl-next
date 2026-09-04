@@ -6,4 +6,4 @@ Fork by Aera
 
 [https://lukazuu.github.io/cstl-next/](https://lukazuu.github.io/cstl-next/)
 
-DOKUMENTASI PLUGIN COMING SOON!
+DOKUMENTASI PLUGIN TANYA AI AJA!
