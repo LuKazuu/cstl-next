@@ -520,7 +520,7 @@ function sanitizeThemeCss(css, resolveAsset) {
   return out;
 }
 
-const UI_HTML_FORBIDDEN_TAGS = new Set(['script', 'iframe', 'object', 'embed', 'applet', 'link', 'meta', 'base']);
+const UI_HTML_FORBIDDEN_TAGS = new Set(['script', 'iframe', 'object', 'embed', 'applet', 'link', 'meta', 'base', 'video', 'audio']);
 
 function sanitizeUiHtml(html) {
   if (typeof html !== 'string' || !html) return '';
@@ -530,6 +530,7 @@ function sanitizeUiHtml(html) {
     if (node.nodeType !== 1) return;
     const tag = node.tagName.toLowerCase();
     if (UI_HTML_FORBIDDEN_TAGS.has(tag)) { node.remove(); return; }
+    if (tag === 'style') { node.textContent = sanitizeThemeCss(node.textContent); return; }
     for (const attr of Array.from(node.attributes)) {
       const name = attr.name.toLowerCase();
       const val = attr.value || '';
@@ -539,7 +540,7 @@ function sanitizeUiHtml(html) {
     }
     for (const child of Array.from(node.childNodes)) walk(child);
   };
-  walk(tpl.content);
+  for (const child of Array.from(tpl.content.childNodes)) walk(child);
   return tpl.innerHTML;
 }
 
@@ -1607,9 +1608,18 @@ const UiExt = {
     inst.call('uiCallback', { id: cbId, args: args || [] }).catch(() => {});
   },
 
-  _query(sel) {
+  _query(inst, sel) {
     if (typeof sel !== 'string' || !sel) return [];
-    try { return Array.from(document.querySelectorAll(sel)); } catch { return []; }
+    const pid = inst && inst.meta && inst.meta.id;
+    if (!pid) return [];
+    let list;
+    try { list = document.querySelectorAll(sel); } catch { return []; }
+    const out = [];
+    for (const el of list) {
+      const owner = el.closest('[data-plugin-id]');
+      if (owner && owner.dataset.pluginId === pid) out.push(el);
+    }
+    return out;
   },
 
   add(inst, spec) {
@@ -1687,6 +1697,7 @@ const UiExt = {
       overlay.className = 'backdrop cstl-plugin-modal';
       const id = UiExt._newId();
       overlay.dataset.pluginUi = id;
+      overlay.dataset.pluginId = inst.meta.id;
       overlay.innerHTML = `
         <div class="modal modal-wide" role="dialog" aria-modal="true">
           <div class="modal-head"><h3>${esc(title)}</h3></div>
@@ -1734,14 +1745,14 @@ const UiExt = {
   text(inst, sel, val) {
     const v = String(val ?? '');
     let n = 0;
-    for (const el of UiExt._query(sel)) { el.textContent = v; n++; }
+    for (const el of UiExt._query(inst, sel)) { el.textContent = v; n++; }
     return n;
   },
 
   html(inst, sel, val) {
     const v = typeof val === 'string' ? sanitizeUiHtml(val) : '';
     let n = 0;
-    for (const el of UiExt._query(sel)) { el.innerHTML = v; n++; }
+    for (const el of UiExt._query(inst, sel)) { el.innerHTML = v; n++; }
     return n;
   },
 
@@ -1750,7 +1761,7 @@ const UiExt = {
     if (!p) return 0;
     const v = val == null ? '' : String(val);
     let n = 0;
-    for (const el of UiExt._query(sel)) { try { el.style.setProperty(p, v); n++; } catch {} }
+    for (const el of UiExt._query(inst, sel)) { try { el.style.setProperty(p, v); n++; } catch {} }
     return n;
   },
 
@@ -1760,7 +1771,7 @@ const UiExt = {
     const parts = c.split(/\s+/).filter(Boolean);
     if (!parts.length) return 0;
     let n = 0;
-    for (const el of UiExt._query(sel)) { el.classList.add(...parts); n++; }
+    for (const el of UiExt._query(inst, sel)) { el.classList.add(...parts); n++; }
     return n;
   },
 
@@ -1770,7 +1781,7 @@ const UiExt = {
     const parts = c.split(/\s+/).filter(Boolean);
     if (!parts.length) return 0;
     let n = 0;
-    for (const el of UiExt._query(sel)) { el.classList.remove(...parts); n++; }
+    for (const el of UiExt._query(inst, sel)) { el.classList.remove(...parts); n++; }
     return n;
   },
 
@@ -1781,7 +1792,7 @@ const UiExt = {
     if (!parts.length) return 0;
     const f = typeof force === 'boolean' ? force : undefined;
     let n = 0;
-    for (const el of UiExt._query(sel)) {
+    for (const el of UiExt._query(inst, sel)) {
       for (const cl of parts) el.classList.toggle(cl, f);
       n++;
     }
@@ -1796,7 +1807,7 @@ const UiExt = {
     const v = val == null ? '' : String(val);
     if ((lowerName === 'href' || lowerName === 'src' || lowerName === 'xlink:href' || lowerName === 'formaction' || lowerName === 'action' || lowerName === 'poster' || lowerName === 'background' || lowerName === 'data' || lowerName === 'codebase') && /^\s*javascript:/i.test(v)) return 0;
     let n = 0;
-    for (const el of UiExt._query(sel)) { try { el.setAttribute(origName, v); n++; } catch {} }
+    for (const el of UiExt._query(inst, sel)) { try { el.setAttribute(origName, v); n++; } catch {} }
     return n;
   },
 
@@ -1804,25 +1815,25 @@ const UiExt = {
     const n_ = String(name || '');
     if (!n_) return 0;
     let n = 0;
-    for (const el of UiExt._query(sel)) { try { el.removeAttribute(n_); n++; } catch {} }
+    for (const el of UiExt._query(inst, sel)) { try { el.removeAttribute(n_); n++; } catch {} }
     return n;
   },
 
   hide(inst, sel) {
     let n = 0;
-    for (const el of UiExt._query(sel)) { el.style.setProperty('display', 'none', 'important'); n++; }
+    for (const el of UiExt._query(inst, sel)) { el.style.setProperty('display', 'none', 'important'); n++; }
     return n;
   },
 
   show(inst, sel) {
     let n = 0;
-    for (const el of UiExt._query(sel)) { el.style.removeProperty('display'); n++; }
+    for (const el of UiExt._query(inst, sel)) { el.style.removeProperty('display'); n++; }
     return n;
   },
 
   remove(inst, sel) {
     let n = 0;
-    for (const el of UiExt._query(sel)) { try { el.remove(); n++; } catch {} }
+    for (const el of UiExt._query(inst, sel)) { try { el.remove(); n++; } catch {} }
     return n;
   },
 
