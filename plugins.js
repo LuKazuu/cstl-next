@@ -520,6 +520,29 @@ function sanitizeThemeCss(css, resolveAsset) {
   return out;
 }
 
+const UI_HTML_FORBIDDEN_TAGS = new Set(['script', 'iframe', 'object', 'embed', 'applet', 'link', 'meta', 'base']);
+
+function sanitizeUiHtml(html) {
+  if (typeof html !== 'string' || !html) return '';
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  const walk = node => {
+    if (node.nodeType !== 1) return;
+    const tag = node.tagName.toLowerCase();
+    if (UI_HTML_FORBIDDEN_TAGS.has(tag)) { node.remove(); return; }
+    for (const attr of Array.from(node.attributes)) {
+      const name = attr.name.toLowerCase();
+      const val = attr.value || '';
+      if (name.startsWith('on')) node.removeAttribute(attr.name);
+      else if ((name === 'href' || name === 'src' || name === 'xlink:href' || name === 'formaction' || name === 'action' || name === 'poster' || name === 'background') && /^\s*javascript:/i.test(val)) node.removeAttribute(attr.name);
+      else if (name === 'style' && /expression\s*\(|url\s*\(\s*['"]?\s*javascript:/i.test(val)) node.removeAttribute(attr.name);
+    }
+    for (const child of Array.from(node.childNodes)) walk(child);
+  };
+  walk(tpl.content);
+  return tpl.innerHTML;
+}
+
 const PERMISSIONS = {
   project: {
     label: 'Baca project',
@@ -566,11 +589,6 @@ const PERMISSIONS = {
     desc: 'Memuat pustaka ZIP di sandbox.',
     icon: '<path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/>'
   },
-  theme: {
-    label: 'Tema',
-    desc: 'CSS tema tampilan.',
-    icon: '<circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="10.5" r="2.5"/><circle cx="8.5" cy="7.5" r="2.5"/><circle cx="6.5" cy="12.5" r="2.5"/><path d="M12 2a10 10 0 1 0 10 10c0-1-1-2-2-2h-2a2 2 0 0 1-2-2c0-.5.2-1 .5-1.5A10 10 0 0 0 12 2z"/>'
-  },
   net: {
     label: 'Akses Internet',
     desc: 'Mengirim permintaan HTTP/HTTPS ke server mana pun.',
@@ -580,6 +598,11 @@ const PERMISSIONS = {
     label: 'Copy/paste',
     desc: 'Membaca dan mengubah teks copy/paste.',
     icon: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>'
+  },
+  ui: {
+    label: 'Manipulasi UI',
+    desc: 'Menambah, mengubah, atau menghapus elemen antarmuka aplikasi.',
+    icon: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>'
   }
 };
 const PERMISSION_IDS = Object.keys(PERMISSIONS);
@@ -950,8 +973,8 @@ const Dialogs = {
       caps.push(`<span class="cap-chip">Parser ${esc(label)}</span>`);
     }
     if (meta.ui) caps.push('<span class="cap-chip">Panel UI</span>');
-    if (meta.settings.global.length) caps.push(`<span class="cap-chip">${meta.settings.global.length} setelan global</span>`);
-    if (meta.settings.project.length) caps.push(`<span class="cap-chip">${meta.settings.project.length} setelan project</span>`);
+    const totalSet = meta.settings.global.length + meta.settings.project.length;
+    if (totalSet) caps.push(`<span class="cap-chip">${totalSet} setelan</span>`);
     if (meta.files.length) caps.push(`<span class="cap-chip">${meta.files.length} asset</span>`);
     if (meta.permissions.includes('wasm')) caps.push('<span class="cap-chip">WASM</span>');
 
@@ -1080,6 +1103,14 @@ function pluginFrameMain(token, panelCss, cmdLabelMax) {
   const COMMAND_LABEL_MAX = cmdLabelMax;
   const pending = new Map();
   const listeners = new Map();
+  const uiCallbacks = new Map();
+  let uiCbSeq = 0;
+  const registerUiCb = fn => {
+    if (typeof fn !== 'function') return null;
+    const id = ++uiCbSeq;
+    uiCallbacks.set(id, fn);
+    return id;
+  };
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const post = m => parent.postMessage(Object.assign({ v: 1, t: token }, m), '*');
@@ -1308,9 +1339,53 @@ function pluginFrameMain(token, panelCss, cmdLabelMax) {
         listBlobs: gated('storage', 'listBlobs'),
         blobExists: gated('storage', 'blobExists'),
         fetch: (url, opts) => { needPerm('net'); return callHost('fetch', [url, opts && typeof opts === 'object' ? opts : {}]); },
-        theme: {
-          setAsset: (key, bytes, mime) => { needPerm('theme'); return callHost('setThemeAsset', [key, bytes, mime]); },
-          deleteAsset: key => { needPerm('theme'); return callHost('deleteThemeAsset', [key]); }
+        ui: {
+          add(spec) {
+            needPerm('ui');
+            const s = isPlainObject(spec) ? Object.assign({}, spec) : {};
+            if (typeof s.onClick === 'function') s.onClick = registerUiCb(s.onClick);
+            return callHost('uiAdd', [s]);
+          },
+          remove(id) { needPerm('ui'); return callHost('uiRemove', [id]); },
+          modal(spec) {
+            needPerm('ui');
+            const s = isPlainObject(spec) ? Object.assign({}, spec) : {};
+            if (Array.isArray(s.actions)) {
+              s.actions = s.actions.map(a => isPlainObject(a) ? Object.assign({}, a, { onClick: typeof a.onClick === 'function' ? registerUiCb(a.onClick) : null }) : a);
+            }
+            return callHost('uiModal', [s]);
+          },
+          text: gated('ui', 'uiText'),
+          html: gated('ui', 'uiHtml'),
+          css: gated('ui', 'uiCss'),
+          addClass: gated('ui', 'uiAddClass'),
+          removeClass: gated('ui', 'uiRemoveClass'),
+          toggleClass: gated('ui', 'uiToggleClass'),
+          attr: gated('ui', 'uiAttr'),
+          removeAttr: gated('ui', 'uiRemoveAttr'),
+          hide: gated('ui', 'uiHide'),
+          show: gated('ui', 'uiShow'),
+          remove: gated('ui', 'uiRemove'),
+          injectCss: gated('ui', 'uiInjectCss'),
+          removeCss: gated('ui', 'uiRemoveCss'),
+          setAsset: (key, bytes, mime) => { needPerm('ui'); return callHost('uiSetAsset', [key, bytes, mime]); },
+          deleteAsset: key => { needPerm('ui'); return callHost('uiDeleteAsset', [key]); },
+          on(sel, event, handler) {
+            needPerm('ui');
+            const cb = registerUiCb(handler);
+            return callHost('uiOn', [sel, event, cb]).then(() => () => {
+              uiCallbacks.delete(cb);
+              callHost('uiOff', [cb]).catch(() => {});
+            });
+          },
+          hotkey(combo, handler) {
+            needPerm('ui');
+            const cb = registerUiCb(handler);
+            return callHost('uiHotkey', [combo, cb]).then(() => () => {
+              uiCallbacks.delete(cb);
+              callHost('uiHotkeyOff', [cb]).catch(() => {});
+            });
+          }
         },
         on: (event, handler) => {
           if (typeof handler !== 'function') return () => {};
@@ -1322,18 +1397,7 @@ function pluginFrameMain(token, panelCss, cmdLabelMax) {
         }
       };
 
-      const commands = [];
-      if (plug.commands && typeof plug.commands === 'object') {
-        for (const key of Object.keys(plug.commands)) {
-          const cmd = plug.commands[key];
-          if (cmd && typeof cmd === 'object' && typeof cmd.run === 'function') {
-            commands.push({ key, label: String(cmd.label || key).slice(0, COMMAND_LABEL_MAX) });
-          }
-        }
-      }
       return {
-        theme: typeof plug.theme === 'string' ? plug.theme : null,
-        commands,
         hooks: { onCopy: typeof plug.onCopy === 'function', onApply: typeof plug.onApply === 'function' },
         extract: typeof plug.extract === 'function',
         pack: typeof plug.pack === 'function',
@@ -1369,10 +1433,7 @@ function pluginFrameMain(token, panelCss, cmdLabelMax) {
         return { blob: out.blob, filename: out.filename || null };
       });
     },
-    command(m) {
-      const cmd = (plug && plug.commands) ? plug.commands[m.key] : null;
-      if (cmd && typeof cmd.run === 'function') return cmd.run(api);
-    },
+    command(m) { return null; },
     panel(m) {
       if (m && typeof m.theme === 'string' && m.theme) {
         let st = document.getElementById('cstl-theme');
@@ -1394,6 +1455,16 @@ function pluginFrameMain(token, panelCss, cmdLabelMax) {
       for (const fn of Array.from(set)) {
         try { fn(m.payload); } catch (e) { console.error('[plugin]', e); }
       }
+    },
+    uiCallback(m) {
+      const id = m && typeof m.id === 'number' ? m.id : 0;
+      const fn = id ? uiCallbacks.get(id) : null;
+      if (typeof fn !== 'function') return null;
+      try {
+        const args = Array.isArray(m.args) ? m.args : [];
+        const r = fn(...args);
+        return Promise.resolve(r).then(() => null).catch(() => null);
+      } catch { return null; }
     }
   };
 
@@ -1501,6 +1572,333 @@ const GpuWorkers = {
   }
 };
 
+const UiExt = {
+  _seq: 0,
+  _slots: {
+    toolbar: '.toolbar-actions .toolbar-group:last-child',
+    tools: '#pluginPanels',
+    sidebar: '.panel-left .panel-header',
+    header: '.toolbar'
+  },
+
+  _newId() { return 'pui-' + (++UiExt._seq); },
+
+  _ensureRegistry(inst) {
+    if (!inst.uiExt) inst.uiExt = { elements: new Map(), styles: new Map(), listeners: [], cbListeners: new Map(), hotkeys: new Map() };
+    return inst.uiExt;
+  },
+
+  release(inst) {
+    const r = inst.uiExt;
+    if (!r) return;
+    for (const el of r.elements.values()) { try { el.remove(); } catch {} }
+    for (const style of r.styles.values()) { try { style.remove(); } catch {} }
+    for (const off of r.listeners) { try { off(); } catch {} }
+    r.elements.clear();
+    r.styles.clear();
+    r.listeners = [];
+    r.cbListeners.clear();
+    r.hotkeys.clear();
+    inst.uiExt = null;
+  },
+
+  _invoke(inst, cbId, args) {
+    if (!cbId) return;
+    inst.call('uiCallback', { id: cbId, args: args || [] }).catch(() => {});
+  },
+
+  _query(sel) {
+    if (typeof sel !== 'string' || !sel) return [];
+    try { return Array.from(document.querySelectorAll(sel)); } catch { return []; }
+  },
+
+  add(inst, spec) {
+    if (!isPlainObject(spec)) throw new Error('Spec UI harus objek.');
+    const r = UiExt._ensureRegistry(inst);
+    const slot = String(spec.slot || '');
+    const parentSel = UiExt._slots[slot];
+    if (!parentSel) throw new Error('Slot tidak dikenal: ' + slot);
+    const parent = document.querySelector(parentSel);
+    if (!parent) throw new Error('Slot target tidak ditemukan: ' + slot);
+    const type = String(spec.type || 'button');
+    const id = UiExt._newId();
+    let el;
+    if (type === 'button' || type === 'item') {
+      el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'btn btn-ghost plugin-ui-el';
+      if (spec.label) el.textContent = String(spec.label).slice(0, 80);
+      if (spec.title) el.title = String(spec.title).slice(0, 200);
+      if (typeof spec.html === 'string' && spec.html) el.innerHTML = sanitizeUiHtml(spec.html);
+      if (spec.onClick) {
+        const cb = () => UiExt._invoke(inst, spec.onClick);
+        el.addEventListener('click', cb);
+        r.listeners.push(() => { try { el.removeEventListener('click', cb); } catch {} });
+      }
+    } else if (type === 'card') {
+      el = document.createElement('div');
+      el.className = 'card plugin-ui-el';
+      if (spec.title) {
+        const h = document.createElement('div');
+        h.className = 'section-label m-0 mb-2';
+        h.textContent = String(spec.title).slice(0, 200);
+        el.appendChild(h);
+      }
+      if (typeof spec.html === 'string') el.innerHTML += sanitizeUiHtml(spec.html);
+    } else if (type === 'text') {
+      el = document.createElement('div');
+      el.className = 'plugin-ui-el';
+      if (typeof spec.html === 'string') el.innerHTML = sanitizeUiHtml(spec.html);
+      else if (spec.label) el.textContent = String(spec.label);
+    } else {
+      throw new Error('Tipe UI tidak valid: ' + type);
+    }
+    el.dataset.pluginUi = id;
+    el.dataset.pluginId = inst.meta.id;
+    parent.appendChild(el);
+    r.elements.set(id, el);
+    return id;
+  },
+
+  remove(inst, id) {
+    const r = inst.uiExt;
+    if (!r) return null;
+    const el = r.elements.get(id);
+    if (el) { try { el.remove(); } catch {} r.elements.delete(id); }
+    return null;
+  },
+
+  modal(inst, spec) {
+    if (!isPlainObject(spec)) throw new Error('Spec modal harus objek.');
+    const r = UiExt._ensureRegistry(inst);
+    const title = String(spec.title || inst.meta.name).slice(0, 200);
+    const bodyHtml = typeof spec.bodyHtml === 'string' ? sanitizeUiHtml(spec.bodyHtml) : '';
+    const actions = Array.isArray(spec.actions) && spec.actions.length
+      ? spec.actions.slice(0, 6).map((a, i) => isPlainObject(a) ? {
+          label: String(a.label ?? 'OK').slice(0, 40),
+          value: a.value === undefined ? i : a.value,
+          primary: !!a.primary,
+          danger: !!a.danger,
+          onClick: typeof a.onClick === 'number' ? a.onClick : null
+        } : { label: String(a).slice(0, 40), value: i, primary: i === 0, danger: false, onClick: null })
+      : [{ label: 'Tutup', value: 0, primary: true, danger: false, onClick: null }];
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'backdrop cstl-plugin-modal';
+      const id = UiExt._newId();
+      overlay.dataset.pluginUi = id;
+      overlay.innerHTML = `
+        <div class="modal modal-wide" role="dialog" aria-modal="true">
+          <div class="modal-head"><h3>${esc(title)}</h3></div>
+          <div class="modal-body">${bodyHtml}</div>
+          <div class="modal-actions">
+            ${actions.map((a, i) => `<button type="button" class="btn ${a.danger ? 'btn-danger' : a.primary ? 'btn-primary' : 'btn-ghost'}" data-modal-idx="${i}">${esc(a.label)}</button>`).join('')}
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      r.elements.set(id, overlay);
+      let settled = false;
+      const finish = (val, cbId) => {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener('keydown', onKey, true);
+        observer.disconnect();
+        overlay.classList.remove('open');
+        overlay.remove();
+        r.elements.delete(id);
+        if (cbId) UiExt._invoke(inst, cbId, []);
+        resolve(val);
+      };
+      const onKey = e => {
+        if (e.key === 'Escape') { e.preventDefault(); finish(null); }
+      };
+      const observer = new MutationObserver(() => {
+        if (!overlay.classList.contains('open')) finish(null);
+      });
+      observer.observe(overlay, { attributes: true, attributeFilter: ['class'] });
+      overlay.addEventListener('click', e => {
+        if (e.target === overlay) finish(null);
+      });
+      overlay.querySelectorAll('[data-modal-idx]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = Number(btn.dataset.modalIdx);
+          const a = actions[idx];
+          finish(a.value, a.onClick);
+        });
+      });
+      document.addEventListener('keydown', onKey, true);
+      requestAnimationFrame(() => overlay.classList.add('open'));
+    });
+  },
+
+  text(inst, sel, val) {
+    const v = String(val ?? '');
+    let n = 0;
+    for (const el of UiExt._query(sel)) { el.textContent = v; n++; }
+    return n;
+  },
+
+  html(inst, sel, val) {
+    const v = typeof val === 'string' ? sanitizeUiHtml(val) : '';
+    let n = 0;
+    for (const el of UiExt._query(sel)) { el.innerHTML = v; n++; }
+    return n;
+  },
+
+  css(inst, sel, prop, val) {
+    const p = String(prop || '');
+    if (!p) return 0;
+    const v = val == null ? '' : String(val);
+    let n = 0;
+    for (const el of UiExt._query(sel)) { try { el.style.setProperty(p, v); n++; } catch {} }
+    return n;
+  },
+
+  addClass(inst, sel, cls) {
+    const c = String(cls || '');
+    if (!c) return 0;
+    const parts = c.split(/\s+/).filter(Boolean);
+    if (!parts.length) return 0;
+    let n = 0;
+    for (const el of UiExt._query(sel)) { el.classList.add(...parts); n++; }
+    return n;
+  },
+
+  removeClass(inst, sel, cls) {
+    const c = String(cls || '');
+    if (!c) return 0;
+    const parts = c.split(/\s+/).filter(Boolean);
+    if (!parts.length) return 0;
+    let n = 0;
+    for (const el of UiExt._query(sel)) { el.classList.remove(...parts); n++; }
+    return n;
+  },
+
+  toggleClass(inst, sel, cls, force) {
+    const c = String(cls || '');
+    if (!c) return 0;
+    const parts = c.split(/\s+/).filter(Boolean);
+    if (!parts.length) return 0;
+    const f = typeof force === 'boolean' ? force : undefined;
+    let n = 0;
+    for (const el of UiExt._query(sel)) {
+      for (const cl of parts) el.classList.toggle(cl, f);
+      n++;
+    }
+    return n;
+  },
+
+  attr(inst, sel, name, val) {
+    const origName = String(name || '');
+    if (!origName) return 0;
+    const lowerName = origName.toLowerCase();
+    if (lowerName.startsWith('on') || lowerName === 'style' || lowerName === 'srcdoc' || lowerName === 'sandbox') return 0;
+    const v = val == null ? '' : String(val);
+    if ((lowerName === 'href' || lowerName === 'src' || lowerName === 'xlink:href' || lowerName === 'formaction' || lowerName === 'action' || lowerName === 'poster' || lowerName === 'background' || lowerName === 'data' || lowerName === 'codebase') && /^\s*javascript:/i.test(v)) return 0;
+    let n = 0;
+    for (const el of UiExt._query(sel)) { try { el.setAttribute(origName, v); n++; } catch {} }
+    return n;
+  },
+
+  removeAttr(inst, sel, name) {
+    const n_ = String(name || '');
+    if (!n_) return 0;
+    let n = 0;
+    for (const el of UiExt._query(sel)) { try { el.removeAttribute(n_); n++; } catch {} }
+    return n;
+  },
+
+  hide(inst, sel) {
+    let n = 0;
+    for (const el of UiExt._query(sel)) { el.style.setProperty('display', 'none', 'important'); n++; }
+    return n;
+  },
+
+  show(inst, sel) {
+    let n = 0;
+    for (const el of UiExt._query(sel)) { el.style.removeProperty('display'); n++; }
+    return n;
+  },
+
+  remove(inst, sel) {
+    let n = 0;
+    for (const el of UiExt._query(sel)) { try { el.remove(); n++; } catch {} }
+    return n;
+  },
+
+  injectCss(inst, css) {
+    if (typeof css !== 'string' || !css) return null;
+    const r = UiExt._ensureRegistry(inst);
+    const sanitized = sanitizeThemeCss(css, key => inst.themeAssets.get(key) || null);
+    const style = document.createElement('style');
+    style.className = 'plugin-ui-css';
+    style.dataset.pluginId = inst.meta.id;
+    const id = UiExt._newId();
+    style.dataset.pluginUi = id;
+    style.textContent = sanitized;
+    document.head.appendChild(style);
+    r.styles.set(id, style);
+    return id;
+  },
+
+  removeCss(inst, id) {
+    const r = inst.uiExt;
+    if (!r) return null;
+    const style = r.styles.get(id);
+    if (style) { try { style.remove(); } catch {} r.styles.delete(id); }
+    return null;
+  },
+
+  on(inst, sel, event, cbId) {
+    const r = UiExt._ensureRegistry(inst);
+    const evt = String(event || '');
+    if (!evt || !cbId) return null;
+    const handler = e => {
+      let matched = null;
+      try { matched = e.target.closest && e.target.closest(sel); } catch {}
+      if (!matched) return;
+      UiExt._invoke(inst, cbId, [{
+        type: e.type,
+        targetTag: matched.tagName.toLowerCase(),
+        targetId: matched.id || null,
+        targetClass: typeof matched.className === 'string' ? matched.className : '',
+        targetText: matched.textContent ? matched.textContent.slice(0, 200) : ''
+      }]);
+    };
+    document.addEventListener(evt, handler, true);
+    const unsub = () => { try { document.removeEventListener(evt, handler, true); } catch {} };
+    r.listeners.push(unsub);
+    r.cbListeners.set(cbId, unsub);
+    return null;
+  },
+
+  off(inst, cbId) {
+    const r = inst.uiExt;
+    if (!r || !r.cbListeners) return null;
+    const unsub = r.cbListeners.get(cbId);
+    if (unsub) { try { unsub(); } catch {} r.cbListeners.delete(cbId); }
+    return null;
+  },
+
+  hotkey(inst, combo, cbId) {
+    const r = UiExt._ensureRegistry(inst);
+    const c = String(combo || '').toLowerCase().trim();
+    if (!c || !cbId) return null;
+    if (typeof host.ui.registerPluginHotkey !== 'function') return null;
+    const unsub = host.ui.registerPluginHotkey(inst.meta.id, c, () => UiExt._invoke(inst, cbId, []));
+    r.hotkeys.set(cbId, unsub);
+    return null;
+  },
+
+  hotkeyOff(inst, cbId) {
+    const r = inst.uiExt;
+    if (!r) return null;
+    const unsub = r.hotkeys.get(cbId);
+    if (typeof unsub === 'function') { try { unsub(); } catch {} r.hotkeys.delete(cbId); }
+    return null;
+  }
+};
+
 const Sandbox = {
   _bound: false,
 
@@ -1565,8 +1963,6 @@ const Sandbox = {
       seq: 0,
       gpuWorkers: new Set(),
       info: null,
-      theme: null,
-      cmdMeta: [],
       hooks: { onCopy: false, onApply: false },
       hasExtract: false,
       hasPack: false,
@@ -1614,8 +2010,6 @@ const Sandbox = {
         jszip: meta.permissions.includes('jszip') ? jszipSrc : null
       });
       inst.info = info;
-      inst.theme = info.theme;
-      inst.cmdMeta = info.commands || [];
       inst.hooks = info.hooks || { onCopy: false, onApply: false };
       inst.hasExtract = !!info.extract;
       inst.hasPack = !!info.pack;
@@ -1632,6 +2026,7 @@ const Sandbox = {
   destroy(inst) {
     Runtime._live.delete(inst);
     GpuWorkers.release(inst);
+    UiExt.release(inst);
     if (inst.panelCard) { try { inst.panelCard.remove(); } catch {} }
     Sandbox._revokeThemeAssets(inst);
     inst.abort();
@@ -1966,8 +2361,6 @@ const Runtime = {
   _rateStore: new Map(),
   _live: new Set(),
   _jszipSrc: null,
-  _styleEl: null,
-  _lastThemeCss: null,
   _sigCache: new WeakMap(),
 
   listMeta() { return Runtime._index.slice(); },
@@ -2185,25 +2578,9 @@ const Runtime = {
   },
 
   applyTheme() {
-    if (!Runtime._styleEl) {
-      Runtime._styleEl = document.createElement('style');
-      Runtime._styleEl.id = 'pluginTheme';
-      document.head.appendChild(Runtime._styleEl);
-    }
-    const parts = [];
+    const vars = host.ui.themeVarsCss();
     for (const inst of Runtime._instances.values()) {
-      if (inst.theme && inst.theme.trim() && inst.meta.permissions.includes('theme')) {
-        parts.push(sanitizeThemeCss(inst.theme, key => inst.themeAssets.get(key) || null));
-      }
-    }
-    const css = parts.join('\n');
-    Runtime._styleEl.textContent = css;
-    if (css !== Runtime._lastThemeCss) {
-      Runtime._lastThemeCss = css;
-      const vars = host.ui.themeVarsCss();
-      for (const inst of Runtime._instances.values()) {
-        if (inst.panelCard) inst.call('panel', { theme: vars }).catch(() => {});
-      }
+      if (inst.panelCard) inst.call('panel', { theme: vars }).catch(() => {});
     }
   },
 
@@ -2397,29 +2774,46 @@ const Runtime = {
       gpuWorker: gate('gpu', source => GpuWorkers.spawn(inst, source)),
       gpuWorkerPost: gate('gpu', (id, data) => GpuWorkers.post(inst, id, data)),
       gpuWorkerTerminate: gate('gpu', id => GpuWorkers.kill(inst, id)),
-      setThemeAsset: gate('theme', (key, bytes, mime) => {
-        if (!validBlobKey(key)) throw new Error('Key asset tema tidak valid.');
+      uiSetAsset: gate('ui', (key, bytes, mime) => {
+        if (!validBlobKey(key)) throw new Error('Key asset UI tidak valid.');
         const m = typeof mime === 'string' ? mime.toLowerCase().trim() : '';
-        if (!THEME_ASSET_MIME_RE.test(m)) throw new Error('Tipe gambar tidak didukung untuk asset tema.');
+        if (!THEME_ASSET_MIME_RE.test(m)) throw new Error('Tipe gambar tidak didukung untuk asset UI.');
         let u8;
         if (bytes instanceof Uint8Array) u8 = bytes;
         else if (bytes instanceof ArrayBuffer) u8 = new Uint8Array(bytes);
-        else throw new Error('Data asset tema harus Uint8Array atau ArrayBuffer.');
+        else throw new Error('Data asset UI harus Uint8Array atau ArrayBuffer.');
         const old = inst.themeAssets.get(key);
         if (old) { try { URL.revokeObjectURL(old); } catch {} }
         const blob = new Blob([u8], { type: m });
-        const url = URL.createObjectURL(blob);
-        inst.themeAssets.set(key, url);
-        Runtime.applyTheme();
+        inst.themeAssets.set(key, URL.createObjectURL(blob));
         return null;
       }),
-      deleteThemeAsset: gate('theme', key => {
+      uiDeleteAsset: gate('ui', key => {
         if (!validBlobKey(key)) return;
         const old = inst.themeAssets.get(key);
         if (old) { try { URL.revokeObjectURL(old); } catch {} }
         inst.themeAssets.delete(key);
-        Runtime.applyTheme();
-      })
+      }),
+      uiAdd: gate('ui', spec => UiExt.add(inst, spec)),
+      uiRemove: gate('ui', id => UiExt.remove(inst, id)),
+      uiModal: gate('ui', spec => UiExt.modal(inst, spec)),
+      uiText: gate('ui', (sel, val) => UiExt.text(inst, sel, val)),
+      uiHtml: gate('ui', (sel, val) => UiExt.html(inst, sel, val)),
+      uiCss: gate('ui', (sel, prop, val) => UiExt.css(inst, sel, prop, val)),
+      uiAddClass: gate('ui', (sel, cls) => UiExt.addClass(inst, sel, cls)),
+      uiRemoveClass: gate('ui', (sel, cls) => UiExt.removeClass(inst, sel, cls)),
+      uiToggleClass: gate('ui', (sel, cls, force) => UiExt.toggleClass(inst, sel, cls, force)),
+      uiAttr: gate('ui', (sel, name, val) => UiExt.attr(inst, sel, name, val)),
+      uiRemoveAttr: gate('ui', (sel, name) => UiExt.removeAttr(inst, sel, name)),
+      uiHide: gate('ui', sel => UiExt.hide(inst, sel)),
+      uiShow: gate('ui', sel => UiExt.show(inst, sel)),
+      uiRemove: gate('ui', sel => UiExt.remove(inst, sel)),
+      uiInjectCss: gate('ui', css => UiExt.injectCss(inst, css)),
+      uiRemoveCss: gate('ui', id => UiExt.removeCss(inst, id)),
+      uiOn: gate('ui', (sel, event, cb) => UiExt.on(inst, sel, event, cb)),
+      uiOff: gate('ui', cb => UiExt.off(inst, cb)),
+      uiHotkey: gate('ui', (combo, cb) => UiExt.hotkey(inst, combo, cb)),
+      uiHotkeyOff: gate('ui', cb => UiExt.hotkeyOff(inst, cb))
     };
   },
 
@@ -2551,28 +2945,6 @@ const Runtime = {
     }
   },
 
-  commands() {
-    const out = [];
-    for (const inst of Runtime._instances.values()) {
-      for (const c of inst.cmdMeta) {
-        out.push({
-          id: `plugin.${inst.meta.id}.${c.key}`,
-          label: c.label,
-          pluginName: inst.meta.name,
-          run: () => inst.call('command', { key: c.key })
-        });
-      }
-    }
-    return out;
-  },
-
-  async runCommand(id) {
-    const cmd = Runtime.commands().find(c => c.id === id);
-    if (!cmd) return;
-    try { await cmd.run(); }
-    catch (e) { Runtime._fail({ id, name: cmd.pluginName }, e); }
-  },
-
   async callExtract(meta, input) {
     const inst = Runtime._instances.get(meta.id);
     if (!inst) throw new Error(`Plugin "${meta.name}" tidak aktif.`);
@@ -2700,21 +3072,6 @@ const PluginUI = {
         }
       });
     }
-
-    ui.btnOpenPlugins.addEventListener('click', () => PluginUI.renderMenu());
-    ui.pluginMenu.addEventListener('click', e => {
-      const setBtn = e.target.closest('[data-plugin-settings]');
-      if (setBtn) {
-        host.ui.closeDropdowns();
-        const meta = Runtime.getMeta(setBtn.dataset.pluginSettings);
-        if (meta) PluginUI.openSettings(meta, 'project');
-        return;
-      }
-      const btn = e.target.closest('[data-cmd]');
-      if (!btn) return;
-      host.ui.closeDropdowns();
-      Runtime.runCommand(btn.dataset.cmd);
-    });
   },
 
   async openManager() {
@@ -2725,7 +3082,6 @@ const PluginUI = {
 
   closeManager() {
     ui.pluginManagerModal.classList.remove('open');
-    host.ui.loadDashboard();
   },
 
   async installFlow(file) {
@@ -2779,10 +3135,10 @@ const PluginUI = {
       ? `<span class="plugin-badge plugin-badge-parser" title="Menangani import/export format khusus">Parser ${esc(p.extensions.join(' '))}${p.magic?.length ? ' +magic' : ''}</span>`
       : '';
     const panelBadge = p.ui ? '<span class="plugin-badge plugin-badge-panel" title="Menyediakan panel UI di panel Alat">Panel</span>' : '';
-    const settingsBadges = [
-      p.settings?.global?.length ? `<span class="plugin-badge plugin-badge-settings" title="Pengaturan global (semua project)">Setelan Global · ${p.settings.global.length}</span>` : '',
-      p.settings?.project?.length ? `<span class="plugin-badge plugin-badge-settings" title="Pengaturan per project">Setelan Project · ${p.settings.project.length}</span>` : ''
-    ].filter(Boolean).join('');
+    const totalSettings = (p.settings?.global?.length || 0) + (p.settings?.project?.length || 0);
+    const settingsBadges = totalSettings
+      ? `<span class="plugin-badge plugin-badge-settings" title="Pengaturan tersedia">Setelan · ${totalSettings}</span>`
+      : '';
     const assetsBadge = p.files.length
       ? `<span class="plugin-badge plugin-badge-package" title="${esc(p.files.join('\n'))}">Asset · ${p.files.length}</span>`
       : '';
@@ -2839,9 +3195,9 @@ const PluginUI = {
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Setujui Izin
         </button>` : ''}
-        ${p.settings?.global?.length ? `<button type="button" class="btn btn-ghost btn-xs btn-plugin-global-settings" title="Pengaturan global plugin">
+        ${(p.settings?.global?.length || p.settings?.project?.length) ? `<button type="button" class="btn btn-ghost btn-xs btn-plugin-settings" title="Pengaturan plugin">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-          Setelan Global
+          Setelan
         </button>` : ''}
         <button type="button" class="btn btn-ghost btn-xs btn-uninstall-plugin" title="Hapus plugin">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.4 14.1A2 2 0 0 1 15.6 22H8.4a2 2 0 0 1-2-1.9L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
@@ -2866,8 +3222,9 @@ const PluginUI = {
       PluginUI.reviewConsent(p);
     });
 
-    row.querySelector('.btn-plugin-global-settings')?.addEventListener('click', () => {
-      PluginUI.openSettings(p, 'global');
+    row.querySelector('.btn-plugin-settings')?.addEventListener('click', () => {
+      const scope = p.settings?.global?.length ? 'global' : 'project';
+      PluginUI.openSettings(p, scope);
     });
 
     row.querySelector('.btn-uninstall-plugin').addEventListener('click', async () => {
@@ -2943,42 +3300,6 @@ const PluginUI = {
     inst.call('panel', { open: true, theme: host.ui.themeVarsCss() }).catch(e => Runtime._fail(inst.meta, e));
   },
 
-  renderMenu() {
-    const menuEl = ui.pluginMenu;
-    if (!menuEl) return;
-    const html = [];
-    const cmds = Runtime.commands();
-    if (cmds.length) {
-      let lastPlugin = null;
-      for (const c of cmds) {
-        if (c.pluginName !== lastPlugin) {
-          lastPlugin = c.pluginName;
-          html.push(`<div class="dropdown-label">${esc(c.pluginName)}</div>`);
-        }
-        const combo = host.ui.shortcutComboFor(c.id);
-        html.push(`<button type="button" class="dropdown-item" data-cmd="${esc(c.id)}"><span class="menu-label">${esc(c.label)}</span>${combo ? `<span class="menu-kbd">${host.ui.comboHtml(combo)}</span>` : ''}</button>`);
-      }
-    }
-    const active = Runtime.listMeta().filter(p => p.enabled === true);
-    const settable = active.filter(p =>
-      Array.isArray(p.settings?.project) && p.settings.project.length > 0
-    );
-    if (settable.length) {
-      if (cmds.length) html.push('<div class="dropdown-sep"></div>');
-      html.push('<div class="dropdown-label">Setelan Project</div>');
-      const gear = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
-      for (const p of settable) {
-        html.push(`<button type="button" class="dropdown-item plugin-settings-item" data-plugin-settings="${esc(p.id)}" title="Setelan project untuk plugin ini"><span class="menu-label">${esc(p.name)}</span><span class="menu-icon-btn">${gear}</span></button>`);
-      }
-    }
-    if (!cmds.length && !settable.length) {
-      html.push(active.length
-        ? '<div class="dropdown-hint">Plugin aktif tidak punya perintah atau setelan project.</div>'
-        : '<div class="dropdown-hint">Belum ada plugin aktif. Kelola lewat Plugin Manager.</div>');
-    }
-    menuEl.innerHTML = html.join('');
-  },
-
   _fieldRow(meta, s, values) {
     const row = document.createElement('div');
     row.className = 'plugin-settings-row';
@@ -3028,15 +3349,14 @@ const PluginUI = {
     const ownFields = (scope === 'global') ? meta.settings?.global : meta.settings?.project;
     const hasOwn = Array.isArray(ownFields) && ownFields.length > 0;
     if (!hasOwn) {
-      host.ui.flash(scope === 'global' ? 'Plugin ini tidak punya setelan global.' : 'Plugin ini tidak punya setelan project.');
+      host.ui.flash('Plugin ini tidak punya setelan.');
       return;
     }
     if (scope === 'project' && !host.state.projectId()) {
-      host.ui.flash('Buka project dulu untuk mengubah setelan project.');
+      host.ui.flash('Buka project dulu untuk mengubah setelan.');
       return;
     }
     const ownMerged = scope === 'global' ? Runtime.globalValuesFor(meta) : Runtime.valuesFor(meta);
-    const scopeLabel = scope === 'global' ? 'Global' : 'Project';
     const form = document.createElement('div');
     form.className = 'plugin-settings-form';
     const ownWrap = document.createElement('div');
@@ -3048,7 +3368,7 @@ const PluginUI = {
     overlay.className = 'backdrop backdrop-top';
     overlay.innerHTML = `
       <div class="modal modal-wide" role="dialog" aria-modal="true">
-        <div class="modal-head"><h3>Setelan ${scopeLabel}: ${esc(meta.name)}</h3></div>
+        <div class="modal-head"><h3>Setelan: ${esc(meta.name)}</h3></div>
         <div class="modal-body"></div>
         <div class="modal-actions">
           <button class="btn btn-ghost btn-plugin-settings-reset">Reset Default</button>
@@ -3060,11 +3380,11 @@ const PluginUI = {
     const body = overlay.querySelector('.modal-body');
     const scopeHint = document.createElement('p');
     scopeHint.className = 'hint m-0 mt-1 mb-2';
-    if (scope === 'global') {
-      scopeHint.textContent = 'Berlaku untuk semua project.';
-    } else {
+    if (scope === 'project') {
       const pn = host.state.projectName() || 'ini';
       scopeHint.textContent = `Hanya berlaku untuk project "${pn}".`;
+    } else {
+      scopeHint.textContent = 'Berlaku untuk semua project.';
     }
     body.append(scopeHint, form);
     document.body.appendChild(overlay);
@@ -3091,7 +3411,7 @@ const PluginUI = {
       if (scope === 'global') Runtime._setScopeValues(meta.id, 'global', PluginUI._readFields(meta, ownFields));
       else Runtime._setValues(meta.id, PluginUI._readFields(meta, ownFields));
       close();
-      host.ui.flash(`Setelan ${scopeLabel.toLowerCase()} "${meta.name}" disimpan.`);
+      host.ui.flash(`Setelan "${meta.name}" disimpan.`);
     });
   }
 };
@@ -3108,8 +3428,6 @@ CSTL.plugins = {
       btnInstallPlugin: g('btnInstallPlugin'),
       pluginFileInput: g('pluginFileInput'),
       pluginList: g('pluginList'),
-      btnOpenPlugins: g('btnOpenPlugins'),
-      pluginMenu: g('pluginMenu'),
       pluginPanels: g('pluginPanels')
     };
     Sandbox.listen();
@@ -3131,8 +3449,6 @@ CSTL.plugins = {
   async runCopyHook(text) { return Runtime.runCopyHook(text); },
   async runApplyHook(text) { return Runtime.runApplyHook(text); },
   emit(event, payload) { return Runtime.emit(event, payload); },
-  commands() { return Runtime.commands(); },
-  async runCommand(id) { return Runtime.runCommand(id); },
   onProjectOpened() { return Runtime.onProjectOpened(); },
   onProjectClosed() { return Runtime.onProjectClosed(); }
 };

@@ -101,8 +101,7 @@ const STATE_SCHEMA = [
 
 const DROPDOWNS = [
   { trigger: 'btnImportMain',   panel: 'importDropdown',    group: 'importGroup'    },
-  { trigger: 'btnCopyAllNames', panel: 'copyNamesDropdown', group: 'copyNamesGroup' },
-  { trigger: 'btnOpenPlugins',  panel: 'pluginMenu',        group: 'pluginMenuGroup' }
+  { trigger: 'btnCopyAllNames', panel: 'copyNamesDropdown', group: 'copyNamesGroup' }
 ];
 
 const $ = id => document.getElementById(id);
@@ -1590,7 +1589,6 @@ const SHORTCUT_ACTIONS = [
   { id: 'work.proofread', label: 'Buka Cari & Replace', scope: 'workspace', def: 'Alt+R', run: () => els.btnProofread.click() },
   { id: 'work.glossary', label: 'Buka Glossary', scope: 'workspace', def: 'Alt+G', run: () => els.btnGlossary.click() },
   { id: 'work.context', label: 'Buka Context', scope: 'workspace', def: 'Alt+X', run: () => els.btnContext.click() },
-  { id: 'work.plugins', label: 'Buka Menu Plugin Project', scope: 'workspace', def: 'Alt+P', run: () => els.btnOpenPlugins.click() },
   { id: 'work.settings', label: 'Buka Pengaturan Project', scope: 'workspace', def: 'Alt+S', run: () => els.btnSettings.click() },
   { id: 'work.toggleToolbar', label: 'Tampil/Sembunyikan Toolbar', scope: 'workspace', def: 'Alt+T', run: () => els.btnToggleHeader.click() },
   { id: 'work.back', label: 'Kembali ke Dashboard', scope: 'workspace', def: 'Alt+B', run: () => App.closeProject() },
@@ -1651,7 +1649,6 @@ function isEditableTarget(t) {
 
 const Shortcuts = {
   _actions: [],
-  _pluginActions: [],
   _map: new Map(),
   _recording: null,
   _bindings: {},
@@ -1667,7 +1664,7 @@ const Shortcuts = {
     Shortcuts.rebuild();
   },
 
-  allActions() { return Shortcuts._actions.concat(Shortcuts._pluginActions); },
+  allActions() { return Shortcuts._actions; },
 
   loadBindings() { return Shortcuts._bindings; },
 
@@ -1700,18 +1697,6 @@ const Shortcuts = {
     }
   },
 
-  refreshPluginActions() {
-    Shortcuts._pluginActions = CSTL.plugins.commands().map(c => ({
-      id: c.id,
-      label: `${c.pluginName}: ${c.label}`,
-      scope: 'always',
-      def: '',
-      run: () => CSTL.plugins.runCommand(c.id)
-    }));
-    Shortcuts.rebuild();
-    if (els.shortcutModal.classList.contains('open')) App.renderShortcutList();
-  },
-
   _onKey(e) {
     if (e.isComposing || e.keyCode === 229) return;
     if (Shortcuts._recording) return;
@@ -1720,7 +1705,16 @@ const Shortcuts = {
     const combo = comboFromEvent(e);
     if (!combo) return;
     const actionId = Shortcuts._map.get(combo);
-    if (!actionId) return;
+    if (!actionId) {
+      const set = PluginHost.ui._pluginHotkeys.get(combo.toLowerCase());
+      if (set && set.size) {
+        e.preventDefault();
+        for (const fn of Array.from(set)) {
+          try { fn(); } catch (err) { console.error('[plugin hotkey]', combo, err); }
+        }
+      }
+      return;
+    }
     const action = Shortcuts.allActions().find(a => a.id === actionId);
     if (!action) return;
     if (isEditableTarget(e.target) && !action.inInputs) return;
@@ -1828,7 +1822,7 @@ function cacheEls() {
     'btnProofreadReset', 'proofreadReplaceInput', 'btnProofreadReplaceAll',
     'proofreadStatus', 'proofreadContainer', 'btnProofreadClose',
     'dashboardSettingsModal', 'shortcutModal', 'shortcutStatus', 'shortcutList', 'btnShortcutsOpen', 'btnShortcutsClose', 'btnShortcutsResetAll',
-    'btnOpenPlugins', 'pluginMenu',
+    'btnOpenPlugins',
     'opfsExplorerModal', 'btnOpfsExplorerOpen', 'btnOpfsExplorerClose',
     'opfsList', 'opfsEmpty', 'opfsEmptyText', 'opfsCrumbs', 'opfsLoading', 'btnOpfsRefresh',
     'busyOverlay', 'busyTitle', 'busyMsg', 'busyBarFill', 'busyActions', 'busyCancel',
@@ -2629,6 +2623,10 @@ const App = {
     });
     els.btnRestoreProject.addEventListener('click', () => els.restoreProjectInput.click());
     els.restoreProjectInput.addEventListener('change', App.restoreProject);
+    els.btnOpenPlugins.addEventListener('click', () => {
+      closeDropdowns();
+      document.getElementById('btnPluginManagerOpen').click();
+    });
 
     let searchTimer = null;
     els.projectSearch.addEventListener('input', () => {
@@ -3334,8 +3332,7 @@ const App = {
     wrap.replaceChildren();
     const groups = [
       { label: 'Dashboard', actions: Shortcuts._actions.filter(a => a.scope === 'dashboard') },
-      { label: 'Workspace', actions: Shortcuts._actions.filter(a => a.scope === 'workspace') },
-      { label: 'Plugin', actions: Shortcuts._pluginActions }
+      { label: 'Workspace', actions: Shortcuts._actions.filter(a => a.scope === 'workspace') }
     ];
     for (const g of groups) {
       if (!g.actions.length) continue;
@@ -4558,22 +4555,25 @@ const PluginHost = {
   },
 
   ui: {
+    _pluginHotkeys: new Map(),
     flash: msg => App.flash(msg),
     comboHtml,
     themeVarsCss,
-    shortcutComboFor: id => {
-      const action = Shortcuts.allActions().find(a => a.id === id);
-      return action ? Shortcuts.bindingFor(action) : '';
-    },
-    onPluginsChanged: () => {
-      Shortcuts.refreshPluginActions();
-      App.syncImportAccept();
-    },
+    onPluginsChanged: () => { App.syncImportAccept(); },
     onShortcutListMaybeRender: () => {
       if (els.shortcutModal.classList.contains('open')) App.renderShortcutList();
     },
     loadDashboard: () => App.loadDashboard(),
-    closeDropdowns: () => closeDropdowns()
+    closeDropdowns: () => closeDropdowns(),
+    registerPluginHotkey: (pluginId, combo, handler) => {
+      if (typeof combo !== 'string' || typeof handler !== 'function') return () => {};
+      const c = combo.toLowerCase().trim();
+      if (!c) return () => {};
+      let set = PluginHost.ui._pluginHotkeys.get(c);
+      if (!set) { set = new Set(); PluginHost.ui._pluginHotkeys.set(c, set); }
+      set.add(handler);
+      return () => { try { set.delete(handler); } catch {} };
+    }
   },
 
   util: {
